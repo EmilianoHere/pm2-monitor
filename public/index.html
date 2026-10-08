@@ -4,13 +4,61 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PM2 Monitor</title>
+    <link rel="stylesheet" href="/css/styles.css" />
+    <!-- Chart.js via CDN; the detail view degrades to a numeric table if blocked. -->
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
+    ></script>
   </head>
   <body>
-    <h1>PM2 Monitor</h1>
-    <p>
-      Dashboard placeholder. The full dashboard (process cards, metrics charts,
-      live logs) is delivered by a later feature. The REST API is live under
-      <code>/api</code> and the WebSocket under <code>/ws</code>.
-    </p>
+    <header class="topbar">
+      <div class="topbar__brand">
+        <span class="topbar__logo">PM2</span>
+        <span class="topbar__title">Monitor</span>
+      </div>
+      <nav class="topbar__nav" id="nav">
+        <button type="button" class="nav__link" data-route="overview">Overview</button>
+      </nav>
+      <div class="topbar__status">
+        <span class="conn conn--ws" id="ws-status" title="Dashboard WebSocket">WS</span>
+        <label class="maint-toggle" title="Suppress alert delivery while monitoring continues">
+          <input type="checkbox" id="maintenance-toggle" />
+          <span>Maintenance</span>
+        </label>
+        <button type="button" class="btn btn--ghost" id="logout-btn" title="Clear stored credentials">
+          Sign out
+        </button>
+      </div>
+    </header>
+
+    <!-- Global PM2-unreachable banner (hidden until the pm2 message says so). -->
+    <div class="banner banner--warn" id="pm2-banner" hidden role="status">
+      <span id="pm2-banner-text">PM2 daemon unreachable — reconnecting…</span>
+    </div>
+
+    <main id="app" class="app">
+      <!-- Views render here. -->
+      <section id="view-overview" class="view"></section>
+      <section id="view-detail" class="view" hidden></section>
+    </main>
+
+    <!-- Reusable confirm dialog for destructive actions (AC9/AC14). -->
+    <div class="modal" id="confirm-modal" hidden>
+      <div class="modal__backdrop" data-confirm-cancel></div>
+      <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <h2 class="modal__title" id="confirm-title">Confirm</h2>
+        <p class="modal__body" id="confirm-body">Are you sure?</p>
+        <div class="modal__actions">
+          <button type="button" class="btn btn--ghost" data-confirm-cancel>Cancel</button>
+          <button type="button" class="btn btn--danger" id="confirm-ok">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Transient toast notifications. -->
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+
+    <script type="module" src="/js/app.js"></script>
   </body>
 </html>

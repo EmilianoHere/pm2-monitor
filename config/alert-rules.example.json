@@ -1,0 +1,73 @@
+{
+  "rules": [
+    {
+      "id": "any-errored",
+      "enabled": true,
+      "description": "Any process reaches the PM2 errored state (restart overlimit).",
+      "match": {
+        "processes": ["*"],
+        "condition": { "type": "errored" }
+      },
+      "severity": "critical",
+      "channels": { "teams": true, "email": true },
+      "cooldownSec": 300
+    },
+    {
+      "id": "api-unexpected-stop",
+      "enabled": true,
+      "description": "The api process stops without an operator-initiated action.",
+      "match": {
+        "processes": ["api"],
+        "condition": { "type": "unexpected-stop" }
+      },
+      "severity": "warning",
+      "channels": { "teams": true }
+    },
+    {
+      "id": "crash-loop",
+      "enabled": true,
+      "description": "Five or more crash-loop restarts within ten minutes.",
+      "match": {
+        "processes": ["*"],
+        "condition": { "type": "restart-threshold", "count": 5, "withinMin": 10 }
+      },
+      "severity": "critical",
+      "channels": { "teams": true, "email": true },
+      "cooldownSec": 600
+    },
+    {
+      "id": "high-cpu",
+      "enabled": true,
+      "description": "Sustained CPU above 85% for two minutes.",
+      "match": {
+        "processes": ["*"],
+        "condition": { "type": "cpu-threshold", "percent": 85, "forSec": 120 }
+      },
+      "severity": "warning",
+      "channels": { "teams": true }
+    },
+    {
+      "id": "high-memory",
+      "enabled": true,
+      "description": "Sustained memory above 1 GiB for two minutes.",
+      "match": {
+        "processes": ["worker"],
+        "condition": { "type": "mem-threshold", "bytes": 1073741824, "forSec": 120 }
+      },
+      "severity": "warning",
+      "channels": { "email": true },
+      "cooldownSec": 900
+    },
+    {
+      "id": "error-spike",
+      "enabled": true,
+      "description": "Twenty or more error-level log lines within a minute.",
+      "match": {
+        "processes": ["*"],
+        "condition": { "type": "error-spike", "count": 20, "withinSec": 60 }
+      },
+      "severity": "warning",
+      "channels": { "teams": true, "email": true }
+    }
+  ]
+}
