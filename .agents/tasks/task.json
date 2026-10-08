@@ -1,0 +1,7 @@
+{
+  "task_id": "task-pm2-monitor-build",
+  "task_description": "Build the entire PM2 process monitor and control-panel application from scratch per .agents/tasks/design.md: a Node 20 + TypeScript (strict) service that connects to the local PM2 daemon, keeps an in-memory state hub of processes/metrics/errors, serves a REST API and a vanilla-JS dashboard over Express, pushes live updates over a ws WebSocket, tracks and dedups errors, and raises configurable alerts via MS Teams webhooks and SMTP email. Must build with zero tsc strict errors and boot gracefully with PM2 not installed.",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-005"],
+  "blocked_reason": null
+}

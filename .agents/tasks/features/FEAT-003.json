@@ -1,0 +1,27 @@
+{
+  "id": "FEAT-003",
+  "type": "feat",
+  "description": "Alerts subsystem: alert channels (MS Teams via fetch, Nodemailer email with sendRaw), the cooldown tracker, the alert engine (event-driven + sampled rules with maintenance gating and allSettled dispatch isolation), and the daily digest scheduler. Depends on FEAT-001 (state hub, error tracker, metrics store, config, events) and FEAT-002 (metrics:tick, error:captured, process:transition semantics). Grounded in design.md 'Alert engine', 'Alert channels', 'Daily digest', 'Maintenance mode', the alert-rule schema, and the disjointness/MEDIUM-2/MEDIUM-3 rules.",
+  "status": "pending",
+  "steps": [
+    "src/alerts/channels/types.ts: AlertChannel {name:'teams'|'email', enabled:boolean, send(payload:AlertPayload):Promise<void>}; AlertPayload {title, severity:'info'|'warning'|'critical', processName, ruleId, summary, facts:{k,v}[], timestamp, suppressedCount}; EmailChannel extends AlertChannel with sendRaw({subject,html,text}):Promise<void>.",
+    "src/alerts/channels/teams.ts: TeamsChannel.send builds a MessageCard JSON (themeColor by severity, activityTitle, facts section, process name + timestamp) and POSTs to TEAMS_WEBHOOK_URL via global fetch with Content-Type application/json and a 10s AbortController timeout; non-2xx/network/timeout rejects. enabled=false when TEAMS_WEBHOOK_URL absent (logged once). Keep the MessageCard builder a pure exported function. Add src/alerts/channels/teams.test.ts asserting the payload shape for each severity (pure builder; no network).",
+    "src/alerts/channels/email.ts: EmailChannel with a Nodemailer transport built once from SMTP config, verify()-ed at startup (failed verify disables channel + warn, does not abort boot); send(payload) sends HTML+text to MAIL_TO; sendRaw({subject,html,text}) sends a raw multi-recipient message (used by the digest). enabled=false when SMTP config absent. Keep the HTML/text builders pure where practical.",
+    "src/alerts/cooldown.ts: CooldownTracker — in-memory Map<string,{lastFired,suppressed}> keyed (ruleId,processName); allow(key, cooldownSec) returns whether a fire is permitted and rolls suppressed counts; injectable clock. Add src/alerts/cooldown.test.ts (fire/suppress/reset timing).",
+    "src/alerts/engine.ts: AlertEngine holding AlertRule[], the CooldownTracker, and enabled channels. Event-driven evaluation wired to MonitorEvents: errored on process:transition to==='errored'; unexpected-stop on transition to stopped/exit the token model classified unexpected; restart-threshold on error:captured level restart intentional===false via ErrorTracker.restartsInWindow(name,rule.withinMin*60) firing at rule.count; error-spike on error:captured level error via ErrorTracker.countInWindow(name,rule.withinSec) firing at rule.count. Sampled evaluation subscribed to metrics:tick (AFTER MonitorState subscribes) running cpu-threshold/mem-threshold via MonitorState.getMetrics -> MetricsStore.sustainedAbove(forSec). Switch over rule.match.condition.type narrows via the discriminated union. On match: build AlertPayload, cooldown gate with suppressedCount rollup ('+N more since last alert'), maintenance gate (when active: record in recent-alerts list + WS alert with delivered:false + log, dispatch to NO channel), else dispatch to targeted channels via Promise.allSettled (one failure logged warn, never throws/blocks the other). Expose a recent-alerts accessor, a reload(rules) that recomputes the tracker max window, and a test(channel) path for POST /api/alerts/test. Add src/alerts/engine.test.ts with a fake state hub, injected clock, and spy channels asserting cooldown, maintenance gating, allSettled isolation, and the restart-threshold/error-spike/sustained wiring.",
+    "src/alerts/digest.ts: a scheduler computing the next DIGEST_HOUR local-time occurrence via setTimeout (reschedules daily); on fire build the digest (per-process status table, restart counts, top error signatures = signatures whose lastSeen is within 24h ranked by all-time count desc top N, labeled an approximation bounded by ERROR_BUFFER_SIZE, total alerts dispatched/suppressed) and send via EmailChannel.sendRaw; independent of maintenance mode; a send failure warns and does not stop the schedule. Only active when DIGEST_ENABLED and the email channel is configured. Add src/alerts/digest.test.ts (next-fire computation across hour boundaries + digest payload builder, injected clock)."
+  ],
+  "acceptance_criteria": [
+    "npm run build compiles with ZERO TypeScript errors.",
+    "npm test passes for cooldown, engine, teams payload builder, and digest tests.",
+    "The engine dispatches via Promise.allSettled so one channel throwing neither crashes the app nor blocks the other (asserted by test).",
+    "Maintenance mode records+logs the alert with delivered:false and dispatches to no channel while active (asserted by test).",
+    "Sampled rules evaluate on metrics:tick after MonitorState has pushed that tick's samples; restart-threshold consults restartsInWindow (crash-loop restarts only)."
+  ],
+  "verification": [
+    "Run: npm run build  — zero tsc strict errors.",
+    "Run: npm test  — alerts subsystem tests pass (cooldown, engine, teams, digest)."
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

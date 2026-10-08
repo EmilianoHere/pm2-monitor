@@ -6,6 +6,10 @@
 # Node artifact files
 node_modules/
 dist/
+# Environment secrets
+.env
+# Runtime logs directory
+logs/
 
 # Compiled Java class files
 *.class

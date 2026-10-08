@@ -1,0 +1,89 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "reviewDoc": "/Users/puser/repos/phinx/Arbitrage/pm2-monitor/.agents/tasks/design-review.md",
+  "summary": {
+    "high": 0,
+    "medium": 3,
+    "nit": 5
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "title": "Metrics poll never populates MetricsStore; no component owns the per-tick push + sampled-rule evaluation loop",
+      "location": "PM2 integration layer (periodic poll), Metrics store, Alert engine (Sampled rules)",
+      "problem": "The poll 'feeds the MetricsStore' and sampled rules are 'checked on each poll tick', but no module owns the loop that runs every METRICS_SAMPLE_SEC, maps each ProcessSnapshot to a MetricSample, calls MetricsStore.push, and triggers AlertEngine sampled-rule evaluation. push takes a single sample while list yields an array; who maps and supplies ts is unspecified. Without this, cpu/mem threshold rules (AC12) cannot fire.",
+      "fix": "Have Pm2Client emit a metrics:tick event with the fresh ProcessSnapshot[] after each successful list(); MonitorState subscribes to push samples (ts=lastUpdated, cpu, mem=memory); AlertEngine subscribes to run sampled-rule evaluation. Specify behavior for non-online/deleted processes (skip push or push zeros; drop samples for deleted names)."
+    },
+    {
+      "id": 2,
+      "severity": "MEDIUM",
+      "title": "Per-rule error-spike/restart-threshold window length vs the tracker's single fixed sliding window is unmapped",
+      "location": "Error tracker (sliding-window counters, restart-window counter), alert-rule schema (error-spike withinSec, restart-threshold withinMin)",
+      "problem": "Each rule specifies its own window (withinSec / withinMin) and multiple rules with different windows can coexist, but the tracker keeps 'a configurable window' (singular) with no stated mapping from a per-rule window to a count. A rule asking for a longer window than the buffer silently under-counts.",
+      "fix": "Size the 1-second-slot ring to the max window any loaded rule requests (recomputed on reload) and expose countInWindow(name, sinceSec) summing the trailing slots; the engine passes each rule's withinSec/withinMin*60. State the over-buffer behavior (clamp+warn or size-to-max)."
+    },
+    {
+      "id": 3,
+      "severity": "MEDIUM",
+      "title": "restart overlimit counts toward both errored and restart-threshold, violating the stated 'at most one condition per event' invariant",
+      "location": "Event->MonitorEvents translation (restart overlimit), Error tracker (restart-window counter), alert-rule schema (disjointness claim)",
+      "problem": "errored fires on the transition reached via restart overlimit, AND the restart-window counter increments on restart overlimit and feeds restart-threshold. So one restart overlimit event maps to both conditions, contradicting the doc's claim that a single lifecycle event maps to at most one condition.",
+      "fix": "Pick one: (a) restart overlimit drives errored only and does not increment the restart-window counter; or (b) it contributes to both and the disjointness claim is narrowed to 'errored and unexpected-stop are disjoint', dropping the broader at-most-one-condition claim. Do not assert both."
+    },
+    {
+      "id": 4,
+      "severity": "NIT",
+      "title": "Name-keyed MonitorState map ignores PM2 duplicate names across pm_ids",
+      "location": "Core data model (Map<string,ProcessSnapshot> keyed by name), Aggregate semantics",
+      "problem": "PM2 permits two separately started fork apps to share a name; the name key collapses them. The design asserts name is a safe unique key without noting this exception.",
+      "fix": "State that duplicate names are treated as one aggregate (operators use unique names, documented in README) or warn on collision with last-writer-wins."
+    },
+    {
+      "id": 5,
+      "severity": "NIT",
+      "title": "GET /logs returns 200 empty for an unknown process, inconsistent with the 404 contract on process detail",
+      "location": "REST table (/logs), Log reading (readLogsTail returns {lines:[]}+200), Error-handling table",
+      "problem": "GET /api/processes/:name 404s for unknown names but /logs returns 200 {lines:[]}, conflating 'unknown process' with 'known process, no readable file'.",
+      "fix": "Resolve the process via the snapshot map first and 404 if the name is unknown; return 200 {lines:[]} only when the process exists but the file is missing/unreadable."
+    },
+    {
+      "id": 6,
+      "severity": "NIT",
+      "title": "sustainedAbove 'metric' selector is untyped; cpu/mem vs memory field-name mismatch risk",
+      "location": "Metrics store (sustainedAbove(name, metric, threshold, durationSec))",
+      "problem": "metric is clearly cpu|mem by context but never typed; a coder could pass 'memory' (ProcessSnapshot field) vs 'mem' (MetricSample field) and mismatch silently.",
+      "fix": "Type it metric: 'cpu' | 'mem' and note it indexes MetricSample, not ProcessSnapshot."
+    },
+    {
+      "id": 7,
+      "severity": "NIT",
+      "title": "Digest 'top error signatures over last 24h' has no backing store as specified",
+      "location": "Daily digest, Error tracker (ring buffer ERROR_BUFFER_SIZE; 1-second-slot windows)",
+      "problem": "The ring buffer holds recent distinct signatures (not 24h of occurrences) and TrackedError.count is all-time, not 24h; the sliding windows are per-process not per-signature. Exact 24h-windowed per-signature counts are not retained.",
+      "fix": "Redefine the digest metric as 'signatures whose lastSeen is within 24h, ranked by total count', and note it is an approximation bounded by ERROR_BUFFER_SIZE."
+    },
+    {
+      "id": 8,
+      "severity": "NIT",
+      "title": "EmailChannel.send(AlertPayload) cannot represent a multi-process digest; digest send path undefined",
+      "location": "Alert channels (EmailChannel.send(payload: AlertPayload)), Daily digest (sends through EmailChannel)",
+      "problem": "AlertPayload is single-process (processName/ruleId/severity required); the digest is a multi-process report that does not fit it, yet the digest 'sends it through the EmailChannel'.",
+      "fix": "Give EmailChannel a sendRaw({subject, html, text}) method (or define a DigestPayload) that the digest uses; state which so the channel interface is complete."
+    }
+  ],
+  "verifiedAssumptions": [
+    ".gitignore has node_modules/, dist/, *.log but not .env and not logs/ (verified by reading the file) — the plan to add .env and logs/ is correct for AC20.",
+    "Repo contains only .git and .gitignore plus the .agents tasks dir (verified by listing).",
+    "Node is v20.19.2 (verified) — global fetch is stable, so Teams-via-fetch with no HTTP dependency is valid.",
+    "pm2 is not installed in the repo (verified) — substantiates the defensive bus-packet reading approach.",
+    "crypto.timingSafeEqual throws RangeError on unequal-length buffers — the safeEqual 32-byte-digest normalization genuinely prevents the throw on both REST and WS paths.",
+    "Browsers cannot set Authorization on a WS upgrade and the server must echo an offered subprotocol — the apikey.<KEY> subprotocol + handleUpgrade echo mechanism is valid."
+  ],
+  "unverifiedAssumptions": [
+    "PM2 5.x bus packet shapes and the exact event enum (online/stop/restart/exit/delete/restart overlimit/start) and the restart=exit-then-online behavior — not verifiable (pm2 not installed); design already flags this and mitigates with defensive reads.",
+    "pm2.describe exposes kill_timeout — unverified; ProcessSnapshot has no killTimeout field, so the GRACE_MS = base + killTimeout path needs a confirmed source (read from raw describe or add killTimeout? to ProcessSnapshot).",
+    "pm_out_log_path / pm_err_log_path available from describe for readLogsTail — unverified (same root cause: pm2 not installed).",
+    "Chart.js CDN reachable at runtime — handled via graceful degradation to a numeric table; noted for completeness."
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "id": "FEAT-005",
+  "type": "feat",
+  "description": "The vanilla-JS dashboard served from public/ and the remaining supporting artifacts (.env.example, sample alert-rules JSON, ecosystem.config.js, README.md), plus the final end-to-end verification and cleanup. Depends on FEAT-004 (REST API, WS protocol, auth) being in place. Grounded in design.md 'Dashboard', 'Deliverables mapping', the REST/WS surface, the config table (.env.example must document every var), the alert-rule schema (sample config), and requirements AC21-AC22.",
+  "status": "pending",
+  "steps": [
+    "public/index.html: loads ES modules via <script type=\"module\">, references Chart.js via CDN with graceful degradation, and contains the top bar (global connectivity / PM2-unreachable banner + maintenance-mode toggle) and mount points for the overview and detail views.",
+    "public/css/styles.css: dashboard styling incl status color classes (green online, red errored, grey stopped, amber launching/stopping) and the confirm-dialog + banner styles.",
+    "public/js/api.js: REST client that reads auth from sessionStorage and attaches X-API-Key (or Authorization) to every call; maps the {error:{code,message}} envelope to thrown errors.",
+    "public/js/ws.js: WebSocket client opening new WebSocket(url, [\"apikey.\"+KEY]) (KEY = api key, or base64 user:pass in basic mode), with backoff reconnect and re-sending subscriptions on reconnect; dispatches hello/state/process:transition/log/alert/pm2/pong.",
+    "public/js/app.js: bootstrap — read/prompt for auth into sessionStorage, open the WS, route between overview and detail views, render the PM2-unreachable banner from the pm2 message and a maintenance toggle hitting POST /api/maintenance.",
+    "public/js/views/overview.js: responsive grid of process cards (name, color-coded status, pid, CPU%, memory, uptime, restarts, mode x instances) with start/stop/restart/reload/delete buttons; stop/restart/delete open a confirm dialog before issuing the call (AC9/AC14).",
+    "public/js/views/detail.js: per-process metadata, a CPU/memory history chart via Chart.js reading /api/processes/:name/metrics with graceful degradation to a numeric table if the CDN is blocked, and the per-process error list from /api/errors.",
+    "public/js/views/logs.js: live log viewer subscribing via WS log:subscribe, a scrolling buffer with client-side text search and a level toggle (info/error only), and an initial backfill from GET /api/processes/:name/logs.",
+    ".env.example: document EVERY env var in the design config table with a short comment and a sane default/example (no real secrets): PORT, HOST, AUTH_MODE, API_KEY, BASIC_USER, BASIC_PASS, SMTP_HOST/PORT/SECURE/USER/PASS, MAIL_FROM, MAIL_TO, TEAMS_WEBHOOK_URL, ALERT_RULES_FILE, METRICS_RETENTION_MIN, METRICS_SAMPLE_SEC, ERROR_BUFFER_SIZE, ERROR_LOG_APPEND, DEFAULT_COOLDOWN_SEC, INTENTIONAL_ACTION_GRACE_MS, ALLOWED_SCRIPT_ROOT, DIGEST_ENABLED, DIGEST_HOUR, LOG_LEVEL.",
+    "config/alert-rules.example.json: a valid sample {rules:[...]} covering several condition types (errored, restart-threshold, cpu-threshold, mem-threshold, error-spike) with per-channel toggles and cooldowns — must validate against loadAlertRules.",
+    "ecosystem.config.js: a PM2 ecosystem file that runs dist/index.js (name pm2-monitor, script dist/index.js, env block referencing the documented vars).",
+    "README.md: what it does; install; configuration of EVERY env var; how to run in dev (npm run dev) and under PM2 (pm2 start ecosystem.config.js); full REST API endpoint reference (the design's table); example Teams MessageCard and email alert payloads; the WS protocol summary; dashboard description; and the documented limitations (whole-history log search out of scope, duplicate process names collapse to one aggregate so use unique names, maintenance mode cleared on restart since state is in-memory, instances:\"max\" unsupported in v1 => use an ecosystem file, per-process HTTP health checks backlogged).",
+    "Final verification + cleanup: npm install, npm run build (zero strict errors), npm test (all pass), and the boot-without-PM2 smoke (node dist/index.js with pm2 absent -> GET / returns dashboard HTML, GET /api/system/health returns JSON pm2Connected:false, process stays up). Validate ecosystem.config.js loads (node -e require) and the sample rules parse + validate. Remove any temp/test artifacts. Confirm .gitignore keeps .env/node_modules/dist/logs out. Do NOT git add . — if committing, stage only the specific intended files; leaving the work uncommitted for review is acceptable."
+  ],
+  "acceptance_criteria": [
+    "GET / returns the dashboard HTML and the referenced JS modules load; the dashboard shows process cards (or an empty state) and the PM2-unreachable banner while PM2 is down.",
+    "npm install, npm run build (zero tsc strict errors), and npm test all succeed end-to-end.",
+    "Boot-without-PM2 smoke passes: process stays up, GET / returns HTML, GET /api/system/health returns JSON pm2Connected:false.",
+    ".env.example documents every env var the app reads; config/alert-rules.example.json validates against loadAlertRules; ecosystem.config.js loads; README.md has all required sections and example Teams/email payloads.",
+    ".gitignore prevents .env/node_modules/dist/logs from being staged; no secrets are committed and no temp/test artifacts remain."
+  ],
+  "verification": [
+    "Run: npm install && npm run build && npm test  — all succeed.",
+    "Boot check: node dist/index.js with pm2 absent and a minimal apikey .env; curl -s localhost:$PORT/ returns the dashboard HTML and curl -s localhost:$PORT/api/system/health returns JSON pm2Connected:false; stop the process.",
+    "Run: node -e \"require('./ecosystem.config.js')\" (loads) and a tsx check that config/alert-rules.example.json passes loadAlertRules."
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
