@@ -848,8 +848,25 @@ function deletedSnapshot(name: string, now: number): ProcessSnapshot {
  */
 export async function createPm2Adapter(): Promise<Pm2Adapter> {
   const pm2 = (await import('pm2')).default;
+  // `pm2.connect` launches a daemon when none is running (daemon mode) — which
+  // would start PM2 just by booting the monitor and defeats graceful
+  // degradation. Gate connect on a ping of the existing daemon: attach only if
+  // one is already alive, otherwise surface an error so the Pm2Client reconnect
+  // loop keeps pm2Connected=false and retries. This never launches a daemon.
+  const client = (pm2 as unknown as { Client?: { pingDaemon(cb: (alive: boolean) => void): void } }).Client;
   return {
-    connect: (cb) => pm2.connect((err: Error | null) => cb(err ?? null)),
+    connect: (cb) => {
+      const doConnect = (): void => pm2.connect((err: Error | null) => cb(err ?? null));
+      if (client && typeof client.pingDaemon === 'function') {
+        client.pingDaemon((alive: boolean) => {
+          if (alive) doConnect();
+          else cb(new Error('PM2 daemon is not running'));
+        });
+        return;
+      }
+      // No ping surface available: fall back to the plain connect.
+      doConnect();
+    },
     disconnect: () => pm2.disconnect(),
     list: (cb) => pm2.list((err: Error | null, procs: unknown) => cb(err ?? null, (procs ?? []) as RawProcess[])),
     describe: (name, cb) =>
