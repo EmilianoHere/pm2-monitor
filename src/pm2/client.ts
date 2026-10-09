@@ -19,6 +19,7 @@ import type { MonitorEvents } from '../core/events.js';
 import { createLogger, type Logger } from '../core/logger.js';
 import type { MonitorState } from '../core/state.js';
 import { neutralizeInheritedIpc } from './ipc.js';
+import { backoffDelay } from '../core/backoff.js';
 import type { LogLine, ProcessSnapshot, TrackedError } from '../core/types.js';
 import {
   aggregateList,
@@ -105,8 +106,6 @@ export interface Pm2ClientOptions {
 }
 
 const PM2_CONNECT_TIMEOUT_MS = 10_000;
-const BACKOFF_BASE_MS = 1000;
-const BACKOFF_CAP_MS = 30_000;
 const JANITOR_INTERVAL_MS = 30_000;
 const MAX_TAIL_LINES = 2000;
 const BUS_CHANNELS = ['process:event', 'process:exception', 'log:err', 'log:out'] as const;
@@ -249,11 +248,13 @@ export class Pm2Client {
     }, delay);
   }
 
-  /** Exponential backoff 1s,2s,4s,… capped at 30s with +/-20% jitter. */
+  /**
+   * Exponential backoff 1s,2s,4s,… capped at 30s with +/-20% jitter. Delegates
+   * to the shared {@link backoffDelay} helper with the default RNG so runtime
+   * behavior is unchanged.
+   */
   private backoffDelay(attempt: number): number {
-    const base = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** attempt);
-    const jitter = base * 0.2 * (Math.random() * 2 - 1);
-    return Math.max(0, Math.round(base + jitter));
+    return backoffDelay(attempt);
   }
 
   // --- list / describe ---

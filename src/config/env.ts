@@ -65,6 +65,35 @@ export const configSchema = z
     DIGEST_HOUR: numeric.int().min(0).max(23).default(8),
 
     LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+
+    // --- multi-instance (hub-and-spoke) mode ---
+    MODE: z.enum(['standalone', 'agent', 'server']).default('standalone'),
+
+    // agent-only
+    SERVER_URL: z.string().url().optional(),
+    AGENT_TOKEN: z.string().min(1).optional(),
+    AGENT_NAME: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      z.string().min(1).optional(),
+    ),
+    AGENT_ID_FILE: z.string().min(1).default('config/agent-id'),
+    AGENT_WS_PATH: z.string().startsWith('/').default('/agent'),
+    TLS_INSECURE: booleanish.default(false),
+
+    // server-only
+    AGENT_TOKENS: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      z.string().min(1).optional(),
+    ),
+    ALIAS_STORE_FILE: z.string().min(1).default('config/agent-aliases.json'),
+    TLS_CERT_FILE: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      z.string().min(1).optional(),
+    ),
+    TLS_KEY_FILE: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      z.string().min(1).optional(),
+    ),
   })
   .superRefine((cfg, ctx) => {
     if (cfg.AUTH_MODE === 'apikey' && !cfg.API_KEY) {
@@ -117,6 +146,69 @@ export const configSchema = z
           });
         }
       }
+    }
+
+    // --- multi-instance mode cross-field guards ---
+    // Agent mode needs a server to dial and a credential to present.
+    if (cfg.MODE === 'agent') {
+      if (!cfg.SERVER_URL) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['SERVER_URL'],
+          message: 'SERVER_URL is required when MODE=agent',
+        });
+      }
+      if (!cfg.AGENT_TOKEN) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['AGENT_TOKEN'],
+          message: 'AGENT_TOKEN is required when MODE=agent',
+        });
+      }
+    }
+
+    // When present, SERVER_URL must be a WebSocket URL (ws:// or wss://).
+    if (cfg.SERVER_URL && !/^wss?:\/\//i.test(cfg.SERVER_URL)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SERVER_URL'],
+        message: 'SERVER_URL must start with ws:// or wss://',
+      });
+    }
+
+    // Server mode needs at least one accepted agent token.
+    if (cfg.MODE === 'server' && !cfg.AGENT_TOKENS && !cfg.AGENT_TOKEN) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['AGENT_TOKENS'],
+        message: 'MODE=server requires AGENT_TOKENS or AGENT_TOKEN',
+      });
+    }
+
+    // Native TLS needs the full cert+key pair; exactly one set is a misconfig.
+    // Neither set is valid (reverse-proxy TLS termination).
+    const hasCert = cfg.TLS_CERT_FILE !== undefined;
+    const hasKey = cfg.TLS_KEY_FILE !== undefined;
+    if (hasCert !== hasKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['TLS_CERT_FILE'],
+        message: 'TLS_CERT_FILE and TLS_KEY_FILE must be set together',
+      });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['TLS_KEY_FILE'],
+        message: 'TLS_CERT_FILE and TLS_KEY_FILE must be set together',
+      });
+    }
+
+    // The agent-facing WS path must not collide with the human /ws path.
+    if (cfg.MODE === 'server' && cfg.AGENT_WS_PATH === '/ws') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['AGENT_WS_PATH'],
+        message: 'AGENT_WS_PATH must not collide with the human /ws path',
+      });
     }
   });
 
