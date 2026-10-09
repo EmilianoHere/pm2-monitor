@@ -107,6 +107,22 @@ module and PM2 loads ecosystem configs through CommonJS `require`. Prefer keepin
 real secrets in `.env` (loaded by dotenv at boot) rather than inlining them in
 `ecosystem.config.cjs`.
 
+Running as a PM2 child works correctly because the monitor neutralizes the PM2
+IPC channel it inherits (the `NODE_CHANNEL_FD` env var) before the `pm2` client
+connects, so the client opens its own connection to the daemon instead of trying
+to speak over the parent-process channel. It also binds the HTTP/WebSocket server
+*before* connecting to PM2, so the dashboard and `GET /api/system/health` always
+come up even if the daemon is slow to respond or temporarily unreachable; the
+PM2 connection is wired up in the background and retried with backoff. Once
+connected, the monitor sees its PM2 siblings — including itself — and
+`GET /api/system/health` reports `pm2Connected: true`.
+
+If you would rather not run under PM2, a `systemd` unit is a straightforward
+alternative: run `node dist/index.js` from a unit whose working directory is the
+project root (so dotenv loads the project-root `.env`), for example with
+`WorkingDirectory=/path/to/pm2-monitor` and `ExecStart=/usr/bin/node dist/index.js`.
+The same secrets-in-`.env` guidance applies.
+
 ## Authentication
 
 Every `/api/*` endpoint requires auth **except** `GET /api/system/health`. The
