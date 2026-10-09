@@ -14,6 +14,7 @@ import { createLogger } from './core/logger.js';
 import { loadConfig } from './config/env.js';
 import { bootstrapStandalone } from './boot/standalone.js';
 import { bootstrapAgent } from './boot/agent.js';
+import { bootstrapServer } from './boot/server.js';
 
 export async function bootstrap(): Promise<void> {
   const config = loadConfig();
@@ -33,7 +34,8 @@ export async function bootstrap(): Promise<void> {
       await bootstrapAgent(config, logger);
       return;
     case 'server':
-      throw new Error('server mode is not yet implemented');
+      await bootstrapServer(config, logger);
+      return;
   }
 }
 

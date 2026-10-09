@@ -103,6 +103,29 @@ test('rejects an invalid process selector', () => {
   assert.equal(result.success, false);
 });
 
+test('accepts an agentId/name composite target, bare names, and *', () => {
+  const result = alertRuleSchema.safeParse({
+    id: 'r1',
+    match: { processes: ['web-01/api', 'worker', '*'], condition: { type: 'errored' } },
+    channels: { teams: true },
+  });
+  assert.equal(result.success, true);
+  if (result.success) {
+    assert.deepEqual(result.data.match.processes, ['web-01/api', 'worker', '*']);
+  }
+});
+
+test('rejects a two-slash or empty-part composite target', () => {
+  for (const bad of ['a/b/c', '/api', 'web-01/', 'web-01//api']) {
+    const result = alertRuleSchema.safeParse({
+      id: 'r1',
+      match: { processes: [bad], condition: { type: 'errored' } },
+      channels: { teams: true },
+    });
+    assert.equal(result.success, false, `${bad} should be rejected`);
+  }
+});
+
 test('loadAlertRules returns [] for a missing file', () => {
   const rules = loadAlertRules(join(tmpdir(), 'does-not-exist-xyz.json'), silent);
   assert.deepEqual(rules, []);

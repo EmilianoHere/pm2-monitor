@@ -12,7 +12,21 @@ import { z } from 'zod';
 import { createLogger, type Logger } from '../core/logger.js';
 
 const processNameRule = z.string().regex(/^[A-Za-z0-9._-]{1,100}$/, 'invalid process name');
-const processSelector = z.union([z.literal('*'), processNameRule]);
+/**
+ * A composite `agentId/name` target (server mode). A strict concatenation of
+ * two safe identifiers joined by a single `/`; neither part may contain `/`, so
+ * the split-on-last-`/` the engine uses is unambiguous.
+ */
+const compositeTargetRule = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/, 'invalid agentId/process target');
+/**
+ * A rule target: `*` (every process on every agent), a bare `name` (that
+ * process on ANY agent), or an `agentId/name` composite (one agent's process).
+ * This is a superset of the former `*`|name union, so existing rule files still
+ * validate and mean the same thing in standalone.
+ */
+const processSelector = z.union([z.literal('*'), processNameRule, compositeTargetRule]);
 const positiveInt = z.number().int().positive();
 
 export const conditionSchema = z.discriminatedUnion('type', [

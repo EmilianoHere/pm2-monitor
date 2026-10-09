@@ -345,6 +345,142 @@ test('test(channel) sends a probe to the named channel and rejects for an unconf
   engine.stop();
 });
 
+// --- agent-awareness (server mode) ---
+
+/** A composite-keyed state hub: processNames/sustainedAbove speak agentId/name keys. */
+class CompositeStateHub implements AlertStateHub {
+  maintenanceActive = false;
+  readonly keys = new Set<string>();
+  readonly sustained = new Map<string, boolean>();
+
+  getMaintenance(): { active: boolean } {
+    return { active: this.maintenanceActive };
+  }
+  getProcess(): ProcessSnapshot | null {
+    return null;
+  }
+  processNames(): string[] {
+    return [...this.keys];
+  }
+  sustainedAbove(key: string, metric: 'cpu' | 'mem'): boolean {
+    return this.sustained.get(`${key}:${metric}`) ?? false;
+  }
+}
+
+function makeAgentAwareEngine(
+  rules: AlertRule[],
+  resolveAgent?: (key: string) => { agentId?: string; agentAlias?: string; name: string },
+) {
+  const events = new MonitorEvents();
+  const state = new CompositeStateHub();
+  const errors = new FakeErrorWindows();
+  const teams = new SpyChannel('teams', true);
+  const email = new SpyChannel('email', true);
+  const now = { t: 1000 };
+  const engine = new AlertEngine({
+    rules,
+    state,
+    events,
+    errors,
+    channels: [teams, email],
+    defaultCooldownSec: 300,
+    logger: silent,
+    cooldown: new CooldownTracker({ now: () => now.t }),
+    now: () => now.t,
+    ...(resolveAgent ? { resolveAgent } : {}),
+  });
+  return { events, state, errors, teams, email, engine, now };
+}
+
+test('a bare rule name fires on that process across all agents (composite keys)', async () => {
+  const resolve = (key: string): { agentId?: string; agentAlias?: string; name: string } => {
+    const i = key.lastIndexOf('/');
+    return i === -1 ? { name: key } : { agentId: key.slice(0, i), name: key.slice(i + 1) };
+  };
+  const h = makeAgentAwareEngine(
+    [rule({ id: 'crash', match: { processes: ['api'], condition: { type: 'errored' } } })],
+    resolve,
+  );
+  h.events.emit('process:transition', { name: 'a1/api', from: 'online', to: 'errored', at: h.now.t });
+  h.events.emit('process:transition', { name: 'a2/api', from: 'online', to: 'errored', at: h.now.t });
+  await flush();
+  // Fired for BOTH agents (distinct composite keys), attributed to each agent.
+  assert.equal(h.teams.sent.length, 2);
+  const ids = h.teams.sent.map((p) => p.agentId).sort();
+  assert.deepEqual(ids, ['a1', 'a2']);
+  assert.equal(h.teams.sent[0].processName, 'api');
+});
+
+test('two agents with a same-named process do NOT share a cooldown', async () => {
+  const resolve = (key: string): { agentId?: string; name: string } => {
+    const i = key.lastIndexOf('/');
+    return i === -1 ? { name: key } : { agentId: key.slice(0, i), name: key.slice(i + 1) };
+  };
+  const h = makeAgentAwareEngine(
+    [rule({ id: 'crash', match: { processes: ['*'], condition: { type: 'errored' } }, cooldownSec: 300 })],
+    resolve,
+  );
+  h.events.emit('process:transition', { name: 'a1/api', from: 'online', to: 'errored', at: h.now.t });
+  h.events.emit('process:transition', { name: 'a2/api', from: 'online', to: 'errored', at: h.now.t });
+  await flush();
+  // Both fire immediately — distinct cooldown keys (a1/api vs a2/api).
+  assert.equal(h.teams.sent.length, 2);
+});
+
+test('full agentId/name rule matches only the owning agent', async () => {
+  const resolve = (key: string): { agentId?: string; name: string } => {
+    const i = key.lastIndexOf('/');
+    return i === -1 ? { name: key } : { agentId: key.slice(0, i), name: key.slice(i + 1) };
+  };
+  const h = makeAgentAwareEngine(
+    [rule({ id: 'crash', match: { processes: ['a1/api'], condition: { type: 'errored' } } })],
+    resolve,
+  );
+  h.events.emit('process:transition', { name: 'a2/api', from: 'online', to: 'errored', at: h.now.t });
+  await flush();
+  assert.equal(h.teams.sent.length, 0, 'a2 must not match an a1-scoped rule');
+  h.events.emit('process:transition', { name: 'a1/api', from: 'online', to: 'errored', at: h.now.t });
+  await flush();
+  assert.equal(h.teams.sent.length, 1);
+  assert.equal(h.teams.sent[0].agentId, 'a1');
+});
+
+test('sampled (cpu) composite matching expands a bare name to every present key', async () => {
+  const resolve = (key: string): { agentId?: string; name: string } => {
+    const i = key.lastIndexOf('/');
+    return i === -1 ? { name: key } : { agentId: key.slice(0, i), name: key.slice(i + 1) };
+  };
+  const h = makeAgentAwareEngine(
+    [rule({ id: 'cpu', match: { processes: ['api'], condition: { type: 'cpu-threshold', percent: 85, forSec: 120 } } })],
+    resolve,
+  );
+  h.state.keys.add('a1/api');
+  h.state.keys.add('a2/api');
+  h.state.sustained.set('a1/api:cpu', true);
+  h.state.sustained.set('a2/api:cpu', false);
+  // handleTick builds present from the emitted list — supply composite-keyed procs.
+  h.events.emit('metrics:tick', [proc('a1/api'), proc('a2/api')]);
+  await flush();
+  assert.equal(h.teams.sent.length, 1, 'only the sustained agent fires');
+  assert.equal(h.teams.sent[0].agentId, 'a1');
+});
+
+test('standalone identity resolver yields byte-identical payloads (no agent fields, no prefix)', async () => {
+  // Default resolver (none injected) is the standalone identity resolver.
+  const h = makeAgentAwareEngine([
+    rule({ id: 'crash', description: 'crashed', match: { processes: ['*'], condition: { type: 'errored' } } }),
+  ]);
+  h.events.emit('process:transition', { name: 'api', from: 'online', to: 'errored', at: h.now.t });
+  await flush();
+  assert.equal(h.teams.sent.length, 1);
+  const p = h.teams.sent[0];
+  assert.equal(p.agentId, undefined);
+  assert.equal(p.agentAlias, undefined);
+  assert.equal(p.processName, 'api');
+  assert.equal(p.title, 'crashed'); // no prefix
+  assert.equal(p.summary, 'api entered the errored state'); // no prefix
+});
+
 test('a rule targeting a disabled channel is skipped for that channel only', async () => {
   const events = new MonitorEvents();
   const state = new FakeStateHub();

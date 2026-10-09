@@ -19,6 +19,13 @@ export interface AlertPayload {
   timestamp: number;
   /** matches suppressed since the last delivered alert for this (rule, process) */
   suppressedCount: number;
+  /**
+   * Originating agent id (server mode only). Absent in standalone, where the
+   * identity resolver leaves it undefined so payloads stay byte-identical.
+   */
+  agentId?: string;
+  /** Originating agent's cosmetic alias (server mode only); absent in standalone. */
+  agentAlias?: string;
 }
 
 /**

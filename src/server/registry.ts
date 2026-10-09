@@ -309,6 +309,11 @@ export class FleetRegistry {
     for (const s of samples) {
       entry.metrics.push(s.name, { ts: s.ts, cpu: s.cpu, mem: s.mem });
     }
+    // Re-emit a per-agent tick so the server-mode fleet alert engine can run its
+    // sampled (cpu/mem) rules. The list is the live process set; fleetEvents
+    // re-keys it with composite agentId/name keys. No-op for standalone (which
+    // uses MonitorState, not an AgentEntry bus).
+    entry.events.emit('metrics:tick', [...entry.processes.values()]);
   }
 
   private onError(entry: AgentEntry, error: TrackedError): void {

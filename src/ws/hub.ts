@@ -25,9 +25,42 @@ import type { Logger } from '../core/logger.js';
 import type { MonitorEvents, ProcessTransitionEvent, LogLineEvent, AlertEvent } from '../core/events.js';
 import type { MonitorSnapshot } from '../core/types.js';
 import { validateWsCredential, type AuthConfig } from '../api/auth.js';
+import { agentIdSchema } from '../protocol/shapes.js';
+import { processNameSchema } from '../api/schemas.js';
 
 const SUBPROTOCOL_PREFIX = 'apikey.';
 const STATE_THROTTLE_MS = 1000;
+
+/** One relayed log line delivered back to a subscribed human client. */
+export interface RelayLogLine {
+  agentId: string;
+  process: string;
+  stream: 'out' | 'err';
+  level: 'info' | 'error';
+  line: string;
+  ts: number;
+}
+
+/** A per-subscription human client the relay pushes lines to (ref-counted upstream). */
+export interface RelayLogClient {
+  deliver(line: RelayLogLine): void;
+}
+
+/**
+ * The fleet log-relay hook the hub uses for agent-scoped `log:subscribe`
+ * (server mode only; undefined in standalone). Mirrors the FleetRegistry
+ * subscribeLogs/unsubscribeLogs surface. `agentId`/`process` are validated by
+ * the hub BEFORE any call here.
+ */
+export interface FleetLogRelay {
+  subscribeLogs(
+    agentId: string,
+    process: string,
+    streams: Array<'out' | 'err'>,
+    client: RelayLogClient,
+  ): boolean;
+  unsubscribeLogs(agentId: string, process: string, client: RelayLogClient): void;
+}
 
 interface ClientState {
   socket: WebSocket;
@@ -35,6 +68,10 @@ interface ClientState {
   channels: Set<string>;
   /** per-process log-tail subscriptions: process name -> set of streams. */
   logSubs: Map<string, Set<'out' | 'err'>>;
+  /** agent-scoped relay subscriptions (server mode): set of `${agentId}/${process}`. */
+  relaySubs: Set<string>;
+  /** the relay client view of this socket (lazily created on first relay subscribe). */
+  relayClient: RelayLogClient | null;
 }
 
 export interface WsHubOptions {
@@ -48,6 +85,12 @@ export interface WsHubOptions {
   /** injectable timer (tests). */
   setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
+  /**
+   * Optional fleet log relay (server mode). When set, a `log:subscribe` that
+   * carries an `agentId` routes through this instead of the local fan-out.
+   * Undefined in standalone — the standalone path stays byte-identical.
+   */
+  relay?: FleetLogRelay;
 }
 
 export class WsHub {
@@ -60,6 +103,7 @@ export class WsHub {
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   private readonly clearTimer: (handle: ReturnType<typeof setTimeout>) => void;
+  private readonly relay: FleetLogRelay | undefined;
 
   private readonly clients = new Set<ClientState>();
 
@@ -85,6 +129,7 @@ export class WsHub {
     this.now = options.now ?? (() => Date.now());
     this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = options.clearTimer ?? ((h) => clearTimeout(h));
+    this.relay = options.relay;
 
     // Echo back the client's offered subprotocol: compliant browsers abort the
     // handshake unless the server selects exactly one of the offered protocols.
@@ -186,12 +231,14 @@ export class WsHub {
       socket,
       channels: new Set(),
       logSubs: new Map(),
+      relaySubs: new Set(),
+      relayClient: null,
     };
     this.clients.add(client);
 
     socket.on('message', (data) => this.handleMessage(client, data.toString()));
-    socket.on('close', () => this.clients.delete(client));
-    socket.on('error', () => this.clients.delete(client));
+    socket.on('close', () => this.dropClient(client));
+    socket.on('error', () => this.dropClient(client));
 
     // hello with the current snapshot immediately on connect.
     this.sendTo(client, { type: 'hello', snapshot: this.getSnapshot(), serverTime: this.now() });
@@ -219,6 +266,12 @@ export class WsHub {
         return;
       }
       case 'log:subscribe': {
+        // Agent-scoped (server mode): validate agentId + process BEFORE any
+        // registry lookup or upstream frame, then route through the relay.
+        if (m.agentId !== undefined) {
+          this.handleRelaySubscribe(client, m);
+          return;
+        }
         if (typeof m.process !== 'string') {
           this.sendTo(client, { type: 'error', code: 'BAD_MESSAGE', message: 'log:subscribe needs process' });
           return;
@@ -230,6 +283,10 @@ export class WsHub {
         return;
       }
       case 'log:unsubscribe': {
+        if (m.agentId !== undefined) {
+          this.handleRelayUnsubscribe(client, m);
+          return;
+        }
         if (typeof m.process === 'string') client.logSubs.delete(m.process);
         return;
       }
@@ -239,6 +296,91 @@ export class WsHub {
       default:
         this.sendTo(client, { type: 'error', code: 'BAD_MESSAGE', message: `unknown type: ${String(m.type)}` });
     }
+  }
+
+  // --- agent-scoped log relay (server mode) ---
+
+  /**
+   * Validates `agentId` (agentIdSchema) and `process` (processNameSchema) on the
+   * hot path BEFORE touching the relay. On any failure the existing BAD_MESSAGE
+   * frame is returned and NEITHER the relay nor the registry is touched.
+   */
+  private handleRelaySubscribe(client: ClientState, m: Record<string, unknown>): void {
+    const idOk = agentIdSchema.safeParse(m.agentId);
+    const procOk = typeof m.process === 'string' && processNameSchema.safeParse(m.process).success;
+    if (!idOk.success || !procOk) {
+      this.sendTo(client, { type: 'error', code: 'BAD_MESSAGE', message: 'invalid agentId or process' });
+      return;
+    }
+    const agentId = idOk.data;
+    const process = m.process as string;
+    const streams = Array.isArray(m.streams)
+      ? (m.streams.filter((s): s is 'out' | 'err' => s === 'out' || s === 'err'))
+      : (['out', 'err'] as Array<'out' | 'err'>);
+    const useStreams = streams.length > 0 ? streams : (['out', 'err'] as Array<'out' | 'err'>);
+
+    if (!this.relay) {
+      this.sendTo(client, { type: 'error', code: 'BAD_MESSAGE', message: 'agent logs not available' });
+      return;
+    }
+    const relayClient = this.relayClientFor(client);
+    const key = `${agentId}/${process}`;
+    if (this.relay.subscribeLogs(agentId, process, useStreams, relayClient)) {
+      client.relaySubs.add(key);
+    }
+  }
+
+  private handleRelayUnsubscribe(client: ClientState, m: Record<string, unknown>): void {
+    const idOk = agentIdSchema.safeParse(m.agentId);
+    const procOk = typeof m.process === 'string' && processNameSchema.safeParse(m.process).success;
+    if (!idOk.success || !procOk) {
+      this.sendTo(client, { type: 'error', code: 'BAD_MESSAGE', message: 'invalid agentId or process' });
+      return;
+    }
+    const agentId = idOk.data;
+    const process = m.process as string;
+    const key = `${agentId}/${process}`;
+    if (!client.relaySubs.has(key)) return;
+    client.relaySubs.delete(key);
+    if (client.relayClient && this.relay) {
+      this.relay.unsubscribeLogs(agentId, process, client.relayClient);
+    }
+  }
+
+  /** The relay client view for a socket (delivers lines as a `log` frame). */
+  private relayClientFor(client: ClientState): RelayLogClient {
+    if (client.relayClient) return client.relayClient;
+    const relayClient: RelayLogClient = {
+      deliver: (line: RelayLogLine) => {
+        this.sendTo(client, {
+          type: 'log',
+          agentId: line.agentId,
+          process: line.process,
+          stream: line.stream,
+          line: line.line,
+          level: line.level,
+          ts: line.ts,
+        });
+      },
+    };
+    client.relayClient = relayClient;
+    return relayClient;
+  }
+
+  /** Removes a client, tearing down any agent-scoped relay subscriptions first. */
+  private dropClient(client: ClientState): void {
+    if (this.relay && client.relayClient && client.relaySubs.size > 0) {
+      for (const key of client.relaySubs) {
+        const idx = key.indexOf('/');
+        if (idx === -1) continue;
+        const agentId = key.slice(0, idx);
+        const process = key.slice(idx + 1);
+        this.relay.unsubscribeLogs(agentId, process, client.relayClient);
+      }
+    }
+    client.relaySubs.clear();
+    client.relayClient = null;
+    this.clients.delete(client);
   }
 
   // --- server → client broadcasts ---

@@ -26,6 +26,9 @@ import type { AlertChannel, AlertPayload, AlertSeverity } from './channels/types
  */
 const UNEXPECTED_EXIT_MESSAGE = 'process exited unexpectedly';
 
+/** Synthetic rule id for the server-mode agent-offline alert (cooldown keyed by agentId). */
+export const AGENT_OFFLINE_RULE_ID = '__agent_offline__';
+
 /** The narrow state-hub surface the engine reads. A fake satisfies this in tests. */
 export interface AlertStateHub {
   getMaintenance(): { active: boolean };
@@ -53,6 +56,31 @@ export interface RecentAlert {
   delivered: boolean;
 }
 
+/**
+ * The split of a (possibly-composite) process key into its agent attribution
+ * and bare process name. In standalone the key is a bare name and the resolver
+ * returns `{ name: key }` with no agentId/agentAlias.
+ */
+export interface AgentInfo {
+  agentId?: string;
+  agentAlias?: string;
+  name: string;
+}
+
+/**
+ * Resolves a process key into its agent attribution + bare name. The default
+ * standalone resolver is the identity resolver {@link identityResolveAgent},
+ * which keeps standalone payloads byte-identical (no agentId/agentAlias, no
+ * summary/title prefix). Server mode injects a resolver closing over the
+ * FleetRegistry + AliasStore.
+ */
+export type ResolveAgent = (key: string) => AgentInfo;
+
+/** Standalone identity resolver: the key IS the bare name; no agent context. */
+export function identityResolveAgent(key: string): AgentInfo {
+  return { name: key };
+}
+
 export interface AlertEngineOptions {
   rules: AlertRule[];
   state: AlertStateHub;
@@ -66,6 +94,12 @@ export interface AlertEngineOptions {
   now?: () => number;
   /** cap on the recent-alerts list (default 200). */
   recentLimit?: number;
+  /**
+   * Splits a (possibly-composite) process key into agent attribution + bare
+   * name. Defaults to the standalone {@link identityResolveAgent}, keeping
+   * existing callers compiling and standalone output byte-identical.
+   */
+  resolveAgent?: ResolveAgent;
 }
 
 const MIN_WINDOW_SEC = 60;
@@ -87,6 +121,7 @@ export class AlertEngine {
   private readonly cooldown: CooldownTracker;
   private readonly now: () => number;
   private readonly recentLimit: number;
+  private readonly resolveAgent: ResolveAgent;
   private readonly recent: RecentAlert[] = [];
 
   private readonly onTransition = (e: ProcessTransitionEvent): void => this.handleTransition(e);
@@ -104,6 +139,7 @@ export class AlertEngine {
     this.now = options.now ?? (() => Date.now());
     this.cooldown = options.cooldown ?? new CooldownTracker({ now: this.now });
     this.recentLimit = Math.max(1, options.recentLimit ?? 200);
+    this.resolveAgent = options.resolveAgent ?? identityResolveAgent;
 
     this.events.on('process:transition', this.onTransition);
     this.events.on('error:captured', this.onError);
@@ -149,6 +185,53 @@ export class AlertEngine {
     });
   }
 
+  /**
+   * Fires a single agent-offline alert (server mode). It is gated by the SAME
+   * global cooldown (synthetic rule id {@link AGENT_OFFLINE_RULE_ID}, keyed by
+   * `agentId`) and the SAME global maintenance holder as every other alert, and
+   * dispatches to all configured+enabled channels. A rapid flap therefore emits
+   * at most one alert per cooldown window.
+   */
+  async emitAgentOffline(agentId: string, agentAlias?: string): Promise<void> {
+    const label = agentAlias ?? agentId;
+    const decision = this.cooldown.allow(AGENT_OFFLINE_RULE_ID, agentId, this.defaultCooldownSec);
+    const payload: AlertPayload = {
+      title: `Agent offline: ${label}`,
+      severity: 'warning',
+      processName: '(agent)',
+      ruleId: AGENT_OFFLINE_RULE_ID,
+      summary: `Agent ${label} disconnected`,
+      facts: [{ k: 'Agent', v: label }],
+      timestamp: this.now(),
+      suppressedCount: 0,
+      agentId,
+    };
+    if (agentAlias !== undefined) payload.agentAlias = agentAlias;
+    if (!decision.allowed) return;
+    payload.suppressedCount = decision.suppressedCount;
+
+    if (this.state.getMaintenance().active) {
+      this.record(payload, false);
+      this.events.emit('alert', { payload, delivered: false });
+      this.logger.info('agent-offline alert suppressed by maintenance mode', { agentId });
+      return;
+    }
+    this.record(payload, true);
+    this.events.emit('alert', { payload, delivered: true });
+    const targets = this.channels.filter((c) => c.enabled);
+    if (targets.length === 0) return;
+    const results = await Promise.allSettled(targets.map((c) => c.send(payload)));
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        this.logger.warn('agent-offline alert delivery failed', {
+          channel: targets[i].name,
+          agentId,
+          error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+        });
+      }
+    });
+  }
+
   // --- window recomputation ---
 
   private applyMaxWindow(): void {
@@ -166,8 +249,9 @@ export class AlertEngine {
 
   private handleTransition(e: ProcessTransitionEvent): void {
     if (e.to === 'errored') {
+      const n = bareName(e.name);
       this.evaluateFor('errored', e.name, (c) => c.type === 'errored', (rule) =>
-        this.buildPayload(rule, e.name, `${e.name} entered the errored state`, [
+        this.buildPayload(rule, e.name, `${n} entered the errored state`, [
           { k: 'From', v: e.from },
           { k: 'To', v: e.to },
         ]),
@@ -177,10 +261,11 @@ export class AlertEngine {
 
   private handleError(e: TrackedError): void {
     const name = e.processName;
+    const n = bareName(name);
     // unexpected-stop: an exit with no intentional-action token consumed.
     if (e.level === 'crash' && e.message === UNEXPECTED_EXIT_MESSAGE) {
       this.evaluateFor('unexpected-stop', name, (c) => c.type === 'unexpected-stop', (rule) =>
-        this.buildPayload(rule, name, `${name} stopped unexpectedly`, [{ k: 'Event', v: 'exit' }]),
+        this.buildPayload(rule, name, `${n} stopped unexpectedly`, [{ k: 'Event', v: 'exit' }]),
       );
     }
 
@@ -198,7 +283,7 @@ export class AlertEngine {
           return this.buildPayload(
             rule,
             name,
-            `${name} restarted ${count} time(s) within ${c.withinMin} min`,
+            `${n} restarted ${count} time(s) within ${c.withinMin} min`,
             [
               { k: 'Restarts', v: String(count) },
               { k: 'Threshold', v: String(c.count) },
@@ -223,7 +308,7 @@ export class AlertEngine {
           return this.buildPayload(
             rule,
             name,
-            `${name} logged ${count} error(s) within ${c.withinSec}s`,
+            `${n} logged ${count} error(s) within ${c.withinSec}s`,
             [
               { k: 'Errors', v: String(count) },
               { k: 'Threshold', v: String(c.count) },
@@ -246,6 +331,7 @@ export class AlertEngine {
 
       for (const name of this.targetNames(rule, [...present])) {
         if (!present.has(name)) continue;
+        const n = bareName(name);
         let matched = false;
         let payload: AlertPayload | null = null;
         if (c.type === 'cpu-threshold') {
@@ -254,7 +340,7 @@ export class AlertEngine {
             payload = this.buildPayload(
               rule,
               name,
-              `${name} CPU above ${c.percent}% for ${c.forSec}s`,
+              `${n} CPU above ${c.percent}% for ${c.forSec}s`,
               [
                 { k: 'Metric', v: 'cpu' },
                 { k: 'Threshold', v: `${c.percent}%` },
@@ -268,7 +354,7 @@ export class AlertEngine {
             payload = this.buildPayload(
               rule,
               name,
-              `${name} memory above ${c.bytes} bytes for ${c.forSec}s`,
+              `${n} memory above ${c.bytes} bytes for ${c.forSec}s`,
               [
                 { k: 'Metric', v: 'mem' },
                 { k: 'Threshold', v: `${c.bytes}` },
@@ -302,31 +388,62 @@ export class AlertEngine {
     }
   }
 
+  /**
+   * Expands a rule's selectors against the present keys (possibly composite).
+   * `*` -> every present key. Otherwise each selector maps: a bare `name`
+   * expands to every present key whose name-part equals it (fleet-wide by name),
+   * and a composite `agentId/name` passes through if present. In standalone the
+   * present keys are bare names and this is identical to the old behavior.
+   */
   private targetNames(rule: AlertRule, present: string[]): string[] {
     if (rule.match.processes.includes('*')) return present;
-    return rule.match.processes;
+    const out: string[] = [];
+    for (const selector of rule.match.processes) {
+      if (selector.includes('/')) {
+        if (present.includes(selector)) out.push(selector);
+      } else {
+        for (const key of present) {
+          if (bareName(key) === selector) out.push(key);
+        }
+      }
+    }
+    return out;
   }
 
-  private ruleTargets(rule: AlertRule, name: string): boolean {
-    return rule.match.processes.includes('*') || rule.match.processes.includes(name);
+  /**
+   * True iff `key` (possibly composite `agentId/name`) matches the rule: via
+   * `*`, the full key, or the bare name-part. A bare rule name thus matches that
+   * process on ANY agent; a composite rule matches one agent's process. In
+   * standalone `key` has no `/`, so the bare-part is the whole key and this
+   * reduces to the former literal match.
+   */
+  private ruleTargets(rule: AlertRule, key: string): boolean {
+    const procs = rule.match.processes;
+    return procs.includes('*') || procs.includes(key) || procs.includes(bareName(key));
   }
 
   private buildPayload(
     rule: AlertRule,
-    name: string,
+    key: string,
     summary: string,
     facts: Array<{ k: string; v: string }>,
   ): AlertPayload {
-    return {
-      title: rule.description ?? `${rule.id}: ${name}`,
+    const agent = this.resolveAgent(key);
+    const name = agent.name;
+    const prefix = agent.agentId !== undefined ? `[${agent.agentAlias ?? agent.agentId}] ` : '';
+    const payload: AlertPayload = {
+      title: `${prefix}${rule.description ?? `${rule.id}: ${name}`}`,
       severity: SEVERITY_TO_PAYLOAD[rule.severity],
       processName: name,
       ruleId: rule.id,
-      summary,
+      summary: `${prefix}${summary}`,
       facts,
       timestamp: this.now(),
       suppressedCount: 0,
     };
+    if (agent.agentId !== undefined) payload.agentId = agent.agentId;
+    if (agent.agentAlias !== undefined) payload.agentAlias = agent.agentAlias;
+    return payload;
   }
 
   // --- cooldown + maintenance gate + dispatch ---
@@ -395,4 +512,13 @@ export class AlertEngine {
 /** Narrows a ProcStatus to the engine's errored check (exported for reuse/tests). */
 export function isErroredStatus(status: ProcStatus): boolean {
   return status === 'errored';
+}
+
+/**
+ * The bare process name of a (possibly-composite) key: everything after the
+ * LAST `/`. A key with no `/` (standalone) returns the whole key unchanged.
+ */
+export function bareName(key: string): string {
+  const idx = key.lastIndexOf('/');
+  return idx === -1 ? key : key.slice(idx + 1);
 }

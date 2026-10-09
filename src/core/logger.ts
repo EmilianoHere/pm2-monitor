@@ -4,7 +4,11 @@
  * - Levels: debug < info < warn < error, gated by LOG_LEVEL.
  * - Child loggers carry a bound context object merged into every record.
  * - A redaction set replaces known secret keys with `***` anywhere they appear
- *   in a logged context object (shallow + one level nested).
+ *   in a logged context object: `redactContext` recurses into nested plain
+ *   objects to FULL DEPTH (no depth bound), so a secret key or a `token=` URL is
+ *   redacted at any nesting level. The one edge is arrays — `redactContext` does
+ *   not recurse into them, so a token-bearing object placed inside an array
+ *   element is NOT key-redacted; log contexts must never array-wrap a secret.
  * - `redactUrl` rewrites `token=...` query values to `token=***` so credentials
  *   carried in a URL never reach the logs.
  * - `warnOnce` / `throttle` rate-limit noisy repeated warnings.
@@ -25,6 +29,9 @@ export const REDACTED_KEYS: ReadonlySet<string> = new Set([
   'BASIC_PASS',
   'SMTP_PASS',
   'TEAMS_WEBHOOK_URL',
+  'AGENT_TOKEN',
+  'AGENT_TOKENS',
+  'SERVER_URL',
 ]);
 
 const REDACTED = '***';
