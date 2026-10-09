@@ -43,6 +43,20 @@ export const processNameSchema = z
   .string()
   .regex(/^[A-Za-z0-9._-]{1,100}$/, 'invalid process name');
 
+/**
+ * Cosmetic agent-alias rule: a trimmed, 1–100-char printable string. Unlike
+ * {@link processNameSchema} it is not restricted to the safe id charset (an
+ * alias is purely a display label and never used for routing/keying), but
+ * control characters are rejected so a logged/rendered alias can never carry a
+ * terminal escape or newline. Reused by both the AliasStore and the PUT route.
+ */
+export const aliasSchema = z
+  .string()
+  .trim()
+  .min(1, 'alias must not be blank')
+  .max(100, 'alias must be at most 100 characters')
+  .refine((v) => !/[\u0000-\u001f\u007f]/.test(v), 'alias must not contain control characters');
+
 function hasAllowedExtension(normalized: string, exts: string[]): boolean {
   const lower = normalized.toLowerCase();
   return exts.some((e) => lower.endsWith(e));

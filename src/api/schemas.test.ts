@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSchemas } from './schemas.js';
+import { buildSchemas, aliasSchema } from './schemas.js';
 
 // A schema set that treats a fixed allowlist of absolute paths as existing.
 const EXISTING = new Set([
@@ -105,4 +105,29 @@ test('metrics query defaults sinceMs to 1h and rejects negatives', () => {
 test('errors limit clamps to <=1000', () => {
   const r = schemas.errorsQuery.safeParse({ query: { limit: '5000' }, params: {}, body: {} });
   assert.equal(r.success && (r.data as { query: { limit: number } }).query.limit, 1000);
+});
+
+// --- cosmetic agent alias ---
+
+test('alias accepts a 1..100 printable string and trims surrounding whitespace', () => {
+  const ok = aliasSchema.safeParse('  Production Web  ');
+  assert.equal(ok.success, true);
+  assert.equal(ok.success && ok.data, 'Production Web', 'alias is trimmed');
+  assert.equal(aliasSchema.safeParse('x').success, true, 'single char ok');
+  assert.equal(aliasSchema.safeParse('a'.repeat(100)).success, true, '100 chars ok');
+});
+
+test('alias rejects blank / whitespace-only input', () => {
+  assert.equal(aliasSchema.safeParse('').success, false, 'empty');
+  assert.equal(aliasSchema.safeParse('   ').success, false, 'whitespace-only (trims to empty)');
+});
+
+test('alias rejects a string longer than 100 chars', () => {
+  assert.equal(aliasSchema.safeParse('a'.repeat(101)).success, false);
+});
+
+test('alias rejects control characters', () => {
+  assert.equal(aliasSchema.safeParse('bad\nname').success, false, 'newline');
+  assert.equal(aliasSchema.safeParse('bad\u001b[31mname').success, false, 'escape');
+  assert.equal(aliasSchema.safeParse('bad\u0000name').success, false, 'NUL');
 });
