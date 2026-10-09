@@ -8,6 +8,9 @@
  * exercise the schema without triggering process.exit.
  */
 
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { z } from 'zod';
 import { createLogger, type Logger } from '../core/logger.js';
@@ -53,7 +56,10 @@ export const configSchema = z
 
     DEFAULT_COOLDOWN_SEC: numeric.int().positive().default(300),
     INTENTIONAL_ACTION_GRACE_MS: numeric.int().positive().default(10000),
-    ALLOWED_SCRIPT_ROOT: z.string().min(1).optional(),
+    ALLOWED_SCRIPT_ROOT: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      z.string().min(1).optional(),
+    ),
 
     DIGEST_ENABLED: booleanish.default(false),
     DIGEST_HOUR: numeric.int().min(0).max(23).default(8),
@@ -129,7 +135,16 @@ export function parseConfig(env: NodeJS.ProcessEnv): z.SafeParseReturnType<unkno
  * code 1 on invalid env after logging the aggregated zod issues.
  */
 export function loadConfig(logger: Logger = createLogger()): Readonly<AppConfig> {
-  dotenv.config();
+  // Resolve the project-root .env from this module so hand-run, PM2, and
+  // systemd all read the same file regardless of process.cwd(). From both
+  // dist/config/env.js and src/config/env.ts, '../..' is the project root.
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const envPath = path.resolve(moduleDir, '..', '..', '.env');
+  if (existsSync(envPath)) {
+    dotenv.config({ path: envPath });
+  } else {
+    dotenv.config();
+  }
   const result = parseConfig(process.env);
   if (!result.success) {
     logger.error('Invalid environment configuration', {

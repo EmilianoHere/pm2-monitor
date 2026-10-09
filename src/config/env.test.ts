@@ -92,3 +92,30 @@ test('rejects a non-positive METRICS_SAMPLE_SEC', () => {
   const result = parseConfig({ API_KEY: 'k', METRICS_SAMPLE_SEC: '0' } as NodeJS.ProcessEnv);
   assert.equal(result.success, false);
 });
+
+test('treats an empty ALLOWED_SCRIPT_ROOT as unset', () => {
+  const result = parseConfig({ API_KEY: 'k', ALLOWED_SCRIPT_ROOT: '' } as NodeJS.ProcessEnv);
+  assert.equal(result.success, true);
+  if (result.success) {
+    assert.equal(result.data.ALLOWED_SCRIPT_ROOT, undefined);
+  }
+});
+
+test('treats a whitespace-only ALLOWED_SCRIPT_ROOT as unset', () => {
+  const result = parseConfig({ API_KEY: 'k', ALLOWED_SCRIPT_ROOT: '   ' } as NodeJS.ProcessEnv);
+  assert.equal(result.success, true);
+  if (result.success) {
+    assert.equal(result.data.ALLOWED_SCRIPT_ROOT, undefined);
+  }
+});
+
+test('preserves a non-empty ALLOWED_SCRIPT_ROOT', () => {
+  const result = parseConfig({
+    API_KEY: 'k',
+    ALLOWED_SCRIPT_ROOT: '/opt/apps',
+  } as NodeJS.ProcessEnv);
+  assert.equal(result.success, true);
+  if (result.success) {
+    assert.equal(result.data.ALLOWED_SCRIPT_ROOT, '/opt/apps');
+  }
+});
