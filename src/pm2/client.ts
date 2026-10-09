@@ -16,8 +16,9 @@
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import type { MonitorEvents } from '../core/events.js';
-import type { Logger } from '../core/logger.js';
+import { createLogger, type Logger } from '../core/logger.js';
 import type { MonitorState } from '../core/state.js';
+import { neutralizeInheritedIpc } from './ipc.js';
 import type { LogLine, ProcessSnapshot, TrackedError } from '../core/types.js';
 import {
   aggregateList,
@@ -103,6 +104,7 @@ export interface Pm2ClientOptions {
   clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
 }
 
+const PM2_CONNECT_TIMEOUT_MS = 10_000;
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_CAP_MS = 30_000;
 const JANITOR_INTERVAL_MS = 30_000;
@@ -846,7 +848,11 @@ function deletedSnapshot(name: string, now: number): ProcessSnapshot {
  * the single import site for `pm2`; keeping it behind the {@link Pm2Adapter}
  * interface means tests inject a fake and never touch a real daemon.
  */
-export async function createPm2Adapter(): Promise<Pm2Adapter> {
+export async function createPm2Adapter(logger: Logger = createLogger()): Promise<Pm2Adapter> {
+  // Sever any inherited PM2 IPC channel (fork-mode child) BEFORE importing and
+  // connecting the pm2 client, otherwise its RPC collides with the parent
+  // channel and pingDaemon/connect hang forever. No-op when not under PM2.
+  neutralizeInheritedIpc(logger);
   const pm2 = (await import('pm2')).default;
   // `pm2.connect` launches a daemon when none is running (daemon mode) — which
   // would start PM2 just by booting the monitor and defeats graceful
@@ -856,11 +862,26 @@ export async function createPm2Adapter(): Promise<Pm2Adapter> {
   const client = (pm2 as unknown as { Client?: { pingDaemon(cb: (alive: boolean) => void): void } }).Client;
   return {
     connect: (cb) => {
-      const doConnect = (): void => pm2.connect((err: Error | null) => cb(err ?? null));
+      // Guard so EXACTLY one of {not-alive, connect callback, timeout} invokes
+      // the outer cb; a timeout feeds the Pm2Client reconnect/backoff loop
+      // instead of hanging if pingDaemon or connect never calls back.
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cb(new Error('pm2 connect timed out'));
+      }, PM2_CONNECT_TIMEOUT_MS);
+      const finish = (err: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        cb(err);
+      };
+      const doConnect = (): void => pm2.connect((err: Error | null) => finish(err ?? null));
       if (client && typeof client.pingDaemon === 'function') {
         client.pingDaemon((alive: boolean) => {
           if (alive) doConnect();
-          else cb(new Error('PM2 daemon is not running'));
+          else finish(new Error('PM2 daemon is not running'));
         });
         return;
       }

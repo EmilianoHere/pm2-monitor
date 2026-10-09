@@ -29,6 +29,7 @@ import type { AlertChannel } from './alerts/channels/types.js';
 import { AlertEngine, type AlertStateHub } from './alerts/engine.js';
 import { DigestScheduler } from './alerts/digest.js';
 import { Pm2Client, createPm2Adapter } from './pm2/client.js';
+import type { Pm2Deps } from './api/server.js';
 import { createServer, type ApiDeps, type ReloadRulesResult } from './api/server.js';
 import { buildSchemas } from './api/schemas.js';
 import { WsHub } from './ws/hub.js';
@@ -122,17 +123,27 @@ export async function bootstrap(): Promise<void> {
     else suppressedCount += 1;
   });
 
-  // --- pm2 client (non-blocking start; HTTP must come up even if PM2 is down) ---
-  const adapter = await createPm2Adapter();
-  const pm2 = new Pm2Client({
-    adapter,
-    state,
-    events,
-    logger,
-    sampleSec: config.METRICS_SAMPLE_SEC,
-    graceMs: config.INTENTIONAL_ACTION_GRACE_MS,
-  });
-  pm2.start();
+  // --- pm2 client (deferred) ---
+  // The real adapter is built in a background task AFTER the HTTP server binds
+  // (see below) so a hung pm2 connect can never block boot. `deps.pm2` must be
+  // non-null and valid from the moment createServer is called, so it points at
+  // this stable facade: before the real client is wired it short-circuits every
+  // control/log call to PM2_UNAVAILABLE (same contract Pm2Client uses while
+  // disconnected); once the background task assigns `pm2Client` the facade
+  // delegates to it. shutdown() awaits `pm2Client?.stop()` guarded for null.
+  let pm2Client: Pm2Client | null = null;
+  const pm2: Pm2Deps = {
+    control: (action, name) =>
+      pm2Client
+        ? pm2Client.control(action, name)
+        : Promise.resolve({ ok: false, code: 'PM2_UNAVAILABLE', message: 'PM2 daemon is not connected' }),
+    startNew: (opts) =>
+      pm2Client
+        ? pm2Client.startNew(opts)
+        : Promise.resolve({ ok: false, code: 'PM2_UNAVAILABLE', message: 'PM2 daemon is not connected' }),
+    readLogsTail: (name, lines, opts) =>
+      pm2Client ? pm2Client.readLogsTail(name, lines, opts) : Promise.resolve([]),
+  };
 
   // --- HTTP + WS ---
   const schemas = buildSchemas({ allowedScriptRoot: config.ALLOWED_SCRIPT_ROOT });
@@ -197,6 +208,30 @@ export async function bootstrap(): Promise<void> {
     });
   });
 
+  // --- pm2 wiring (background; never blocks or crashes boot) ---
+  // The HTTP server is already listening. Build the real adapter and start the
+  // client's non-blocking connect/backoff loop off the boot path, so a hung or
+  // throwing createPm2Adapter()/connect cannot stop listen from being reached.
+  void (async () => {
+    try {
+      const adapter = await createPm2Adapter(logger);
+      const client = new Pm2Client({
+        adapter,
+        state,
+        events,
+        logger,
+        sampleSec: config.METRICS_SAMPLE_SEC,
+        graceMs: config.INTENTIONAL_ACTION_GRACE_MS,
+      });
+      pm2Client = client;
+      client.start();
+    } catch (err) {
+      logger.error('pm2 wiring failed; continuing without PM2', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  })();
+
   // --- daily digest ---
   const digest = new DigestScheduler({
     email,
@@ -225,7 +260,7 @@ export async function bootstrap(): Promise<void> {
       wsHub.close();
       digest.stop();
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await pm2.stop();
+      await pm2Client?.stop();
       state.stop();
       errors.stop();
       engine.stop();
@@ -246,9 +281,20 @@ export async function bootstrap(): Promise<void> {
   });
 }
 
-// Run when invoked directly (node dist/index.js). Importers (tests) do not boot.
+/**
+ * Boot when this module is the program entry point. Two cases boot:
+ *  1. Direct invocation: `node dist/index.js` — argv[1] resolves to this file.
+ *  2. PM2 fork mode: PM2 does NOT exec the script directly; it runs its own
+ *     `ProcessContainerFork.js` which `require()`s this module, so argv[1] is
+ *     PM2's container path, never this file. PM2 sets `pm_id` in the child env,
+ *     so that marks a PM2-managed launch and must boot too — otherwise the app
+ *     loads silently and never starts (no logs, no port).
+ * Importers (tests) hit neither case and do not boot.
+ */
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
-if (invokedPath === fileURLToPath(import.meta.url)) {
+const invokedDirectly = invokedPath === fileURLToPath(import.meta.url);
+const underPm2 = typeof process.env.pm_id === 'string' && process.env.pm_id.length > 0;
+if (invokedDirectly || underPm2) {
   bootstrap().catch((err) => {
     // eslint-disable-next-line no-console
     console.error('fatal boot error', err);
