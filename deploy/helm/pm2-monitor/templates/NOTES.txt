@@ -5,10 +5,12 @@ pm2-monitor (SERVER / hub mode) has been deployed.
 {{- if .Values.ingress.enabled }}
    Via Ingress:
    {{- range .Values.ingress.hosts }}
+   {{- $host := .host }}
    {{- $scheme := "http" }}
    {{- if $.Values.ingress.tls }}{{ $scheme = "https" }}{{- end }}
-   {{- range .paths }}
-     {{ $scheme }}://{{ .host }}{{ .path }}
+   {{- $paths := .paths | default (list (dict "path" "/")) }}
+   {{- range $paths }}
+     {{ $scheme }}://{{ $host }}{{ .path }}
    {{- end }}
    {{- end }}
 {{- else }}

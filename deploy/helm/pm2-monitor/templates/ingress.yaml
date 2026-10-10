@@ -32,7 +32,11 @@ spec:
     - host: {{ .host | quote }}
       http:
         paths:
-          {{- range .paths }}
+          {{- /* Default to a single "/" Prefix path so overriding only the
+                 host (e.g. --set ingress.hosts[0].host=...) still renders a
+                 working backend. */ -}}
+          {{- $paths := .paths | default (list (dict "path" "/" "pathType" "Prefix")) }}
+          {{- range $paths }}
           - path: {{ .path }}
             pathType: {{ .pathType | default "Prefix" }}
             backend:

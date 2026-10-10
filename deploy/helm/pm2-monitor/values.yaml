@@ -74,12 +74,14 @@ env:
   # Must sit on the writable PVC dir (write-temp-then-rename happens in this dir).
   ALIAS_STORE_FILE: /app/config/agent-aliases.json
   ALERT_RULES_FILE: config/alert-rules.json
-  METRICS_INTERVAL_MS: "5000"
-  METRICS_RETENTION: "720"
-  ERROR_SCAN_INTERVAL_MS: "10000"
+  METRICS_RETENTION_MIN: "180"
+  METRICS_SAMPLE_SEC: "5"
+  ERROR_BUFFER_SIZE: "500"
+  ERROR_LOG_APPEND: "false"
   DEFAULT_COOLDOWN_SEC: "300"
-  INTENTIONAL_ACTION_GRACE_MS: "15000"
-  DIGEST_INTERVAL_MS: "3600000"
+  INTENTIONAL_ACTION_GRACE_MS: "10000"
+  DIGEST_ENABLED: "false"
+  DIGEST_HOUR: "8"
   LOG_LEVEL: info
 
 # Secret values for server mode.
