@@ -14,6 +14,9 @@ logs/
 # alias map (server mode) are per-deployment runtime state, never committed.
 config/agent-id
 config/agent-aliases.json
+config/api-keys.json
+config/settings.json
+config/secrets.json
 
 # Compiled Java class files
 *.class
