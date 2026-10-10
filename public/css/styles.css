@@ -534,3 +534,145 @@ select {
   outline: none;
   border-color: var(--accent);
 }
+
+/* --- Settings view --- */
+.settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap);
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .settings {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings__group {
+  margin-bottom: 18px;
+}
+
+.settings__group-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+.settings__field {
+  margin-bottom: 12px;
+}
+
+.settings__field-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.settings__field input[type="text"],
+.settings__field input[type="password"] {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 5px 9px;
+}
+
+.settings__field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.settings__field-error {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.settings__actions {
+  margin-top: 14px;
+}
+
+.settings__banner {
+  border: 1px solid var(--warn-border);
+  border-radius: 6px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+/* Saved-but-pending-restart marker on a restart-required field. */
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  vertical-align: middle;
+}
+
+.badge--pending {
+  color: var(--status-launching);
+  border-color: var(--status-launching);
+  background: var(--warn-bg);
+}
+
+/* Write-only secret / SERVER_URL fields: set/not-set + Clear. */
+.secret-field__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.secret-field__row input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* API-keys panel bits. */
+.key-label {
+  margin-right: 6px;
+}
+
+.key-relabel-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: 13px;
+  max-width: 160px;
+}
+
+.key-relabel-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* One-time raw-key reveal modal. */
+.key-modal__value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 18px;
+}
+
+.key-modal__value code {
+  flex: 1;
+  word-break: break-all;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
+}

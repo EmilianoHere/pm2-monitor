@@ -276,6 +276,63 @@ The dashboard prompts for the credential once and stores it in `sessionStorage`,
 attaching it to every REST call and to the WebSocket upgrade. Credential
 comparison is constant-time and never throws on malformed/wrong-length input.
 
+## Settings & privilege model
+
+The dashboard **Settings** section (shown only to a master session) edits
+configuration and manages API keys at runtime. State lives in gitignored JSON
+files under `config/` — nothing new is written until you make a change.
+
+### Master vs secondary keys
+
+- **Master credential.** In `AUTH_MODE=apikey` the `.env` `API_KEY` is the
+  master credential and is **always** honored, even if `config/api-keys.json` is
+  missing, empty, or corrupt. This is the anti-lockout guarantee: generated keys
+  can never lock you out of the server, because the `.env` key is checked
+  independently of the key store.
+- **Secondary keys.** Keys generated from Settings are *secondary*. They
+  authenticate ordinary `/api/*` calls but are **not** master, so they get `403`
+  on the Settings routes (`/api/settings/*`). Only the master credential may read
+  or change settings and manage keys — the server enforces this with a
+  `requireMaster` guard, so client-side gating is convenience only.
+- In `AUTH_MODE=basic` the configured basic user is always master. Secondary
+  keys are still manageable (so you can pre-provision them), but they **only
+  authenticate once you switch to `AUTH_MODE=apikey`**. The keys panel shows a
+  banner to that effect in basic mode.
+
+### Generating, revoking, relabeling, and rotating
+
+- **Generate** produces a random key and shows the raw value **exactly once** in
+  a modal with a Copy button — it is never shown again and never persisted. Only
+  the key's SHA-256 hash, a display prefix (`pmk_…`), label, creation time, and
+  status are stored.
+- **Revoke** immediately stops a key from authenticating (REST and WebSocket).
+- **Relabel** changes only the display label; the key keeps working.
+- **Agent-token rotation.** Secret config values — `SMTP_PASS`,
+  `TEAMS_WEBHOOK_URL`, `AGENT_TOKEN`, `AGENT_TOKENS` — plus `SERVER_URL` are
+  edited **write-only**: the UI shows a set/not-set indicator and a Clear button,
+  never the current value. Set a new value to rotate; use Clear to unset.
+
+### At-rest protection (MVP)
+
+`config/api-keys.json`, `config/settings.json`, and `config/secrets.json` are
+**gitignored** and written with `0600` (owner read/write) filesystem
+permissions. For this MVP the at-rest controls are filesystem permissions plus
+gitignore — **not** encryption. Protect the host and its backups accordingly.
+Logs redact secret keys (including `rawKey`, `hash`, and `apiKey`) at any depth.
+
+### Hot vs restart-required
+
+Settings are split into two groups:
+
+- **Hot (applies immediately):** `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`,
+  `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM`, `MAIL_TO`, `TEAMS_WEBHOOK_URL`,
+  `ERROR_LOG_APPEND`, `DEFAULT_COOLDOWN_SEC`, `DIGEST_ENABLED`, `DIGEST_HOUR`,
+  `LOG_LEVEL`. Saving these re-binds the owning subsystem live.
+- **Restart required:** everything else (`PORT`, `HOST`, `AUTH_MODE`,
+  `SERVER_URL`, `AGENT_TOKEN`, the metrics/error ring sizes, etc.). These are
+  persisted and take effect on the next restart; a saved restart-required field
+  shows a **pending until restart** badge until then.
+
 ## REST API reference
 
 Base path `/api`. Success responses return the resource JSON directly; errors

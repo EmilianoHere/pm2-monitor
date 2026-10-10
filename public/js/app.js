@@ -14,6 +14,7 @@ import { WsClient } from './ws.js';
 import { OverviewView } from './views/overview.js';
 import { DetailView } from './views/detail.js';
 import { AgentsView } from './views/agents.js';
+import { SettingsView } from './views/settings.js';
 
 // --- DOM refs ---
 const els = {
@@ -26,6 +27,7 @@ const els = {
   overview: document.getElementById('view-overview'),
   detail: document.getElementById('view-detail'),
   fleet: document.getElementById('view-fleet'),
+  settings: document.getElementById('view-settings'),
   confirmModal: document.getElementById('confirm-modal'),
   confirmTitle: document.getElementById('confirm-title'),
   confirmBody: document.getElementById('confirm-body'),
@@ -111,6 +113,10 @@ let detail = new DetailView({
 // Server-mode fleet overview (lazily constructed when mode === 'server').
 let fleet = null;
 
+// Settings view (lazily constructed when a master session is confirmed via
+// whoami). Null until a 200 renders the Settings nav in either mode.
+let settings = null;
+
 let currentRoute = 'overview';
 
 function route(view, name) {
@@ -121,11 +127,14 @@ function route(view, name) {
   els.overview.hidden = view !== 'overview';
   els.detail.hidden = view !== 'detail';
   if (els.fleet) els.fleet.hidden = view !== 'fleet';
+  if (els.settings) els.settings.hidden = view !== 'settings';
 
   if (view === 'detail') {
     detail.mount(name).catch((err) => toast(`detail failed: ${err.message}`, 'error'));
   } else if (view === 'fleet') {
     if (fleet) fleet.refresh();
+  } else if (view === 'settings') {
+    if (settings) settings.mount().catch((err) => toast(`settings failed: ${err.message}`, 'error'));
   } else {
     // overview (same component in both modes; the per-agent variant is bound to
     // an agentId by openAgent)
@@ -280,8 +289,41 @@ async function boot() {
     await bootStandalone();
   }
 
+  // Master-gated Settings nav (both modes). Only a 200 from whoami renders it;
+  // any ApiError/network failure (403/401/5xx/timeout) leaves it absent and the
+  // view hidden (FR-F2/AC-34). Hard enforcement is server-side (requireMaster).
+  await setupSettingsNav();
+
   // Keep the WS warm.
   setInterval(() => ws.ping(), 30000);
+}
+
+// Appends a Settings nav button and lazily constructs SettingsView when the
+// stored credential is master. Runs after buildNav() (server mode) so it does not
+// clobber the Fleet link.
+async function setupSettingsNav() {
+  let who;
+  try {
+    who = await api.whoami();
+  } catch {
+    return; // not master (or transient failure) — no Settings entry
+  }
+  if (!who || who.isMaster !== true) return;
+
+  settings = new SettingsView({
+    root: els.settings,
+    api,
+    toast,
+    confirm: confirmDialog,
+    authMode: who.authMode,
+  });
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'nav__link';
+  btn.dataset.route = 'settings';
+  btn.textContent = 'Settings';
+  els.nav.appendChild(btn);
 }
 
 async function bootStandalone() {

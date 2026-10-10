@@ -168,4 +168,18 @@ export const api = {
   getMaintenance: () => request('GET', '/api/maintenance'),
   setMaintenance: ({ active, durationMin, reason } = {}) =>
     request('POST', '/api/maintenance', { body: { active, durationMin, reason } }),
+
+  // --- settings (master-only; a 200 from whoami proves master) ---
+  // whoami throws ApiError on any non-2xx (403/401/5xx), which the dashboard
+  // treats uniformly as "not master, don't render Settings" (FR-F2/AC-34).
+  whoami: () => request('GET', '/api/settings/whoami'),
+  getSettings: () => request('GET', '/api/settings'),
+  putSettings: (patch) => request('PUT', '/api/settings', { body: patch }),
+  clearSecret: (field) =>
+    request('DELETE', `/api/settings/secrets/${encodeURIComponent(field)}`),
+  listKeys: () => request('GET', '/api/settings/keys'),
+  generateKey: (label) => request('POST', '/api/settings/keys', { body: { label } }),
+  revokeKey: (id) => request('DELETE', `/api/settings/keys/${encodeURIComponent(id)}`),
+  relabelKey: (id, label) =>
+    request('PATCH', `/api/settings/keys/${encodeURIComponent(id)}`, { body: { label } }),
 };
