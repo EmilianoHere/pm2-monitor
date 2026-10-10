@@ -317,6 +317,26 @@ test('PUT invalid field -> 400 VALIDATION, nothing persisted', async () => {
   }
 });
 
+test('PUT breaking a cross-field group -> 400 VALIDATION, nothing persisted (AC-22)', async () => {
+  const h = await boot();
+  try {
+    // SMTP_HOST alone passes stage-1 shape but fails the stage-2 email-group
+    // cross-field guard (SMTP_USER/SMTP_PASS/MAIL_FROM/MAIL_TO still unset).
+    const res = await http(h.base, 'PUT', '/api/settings', {
+      headers: master,
+      body: { SMTP_HOST: 'smtp.example.com' },
+    });
+    assert.equal(res.status, 400);
+    assert.equal((res.json as { error: { code: string } }).error.code, 'VALIDATION');
+    // Nothing persisted: the effective config still has no SMTP_HOST.
+    assert.equal(h.settings.getEffective().SMTP_HOST, undefined, 'nothing persisted');
+    // No hot setter fired.
+    assert.deepEqual(h.calls.email, []);
+  } finally {
+    await h.close();
+  }
+});
+
 test('saving LOG_LEVEL takes effect live (hot setter invoked)', async () => {
   const h = await boot();
   try {
@@ -355,14 +375,59 @@ test('GET /api/settings never contains a plaintext secret (AC-25,29)', async () 
     const res = await http(h.base, 'GET', '/api/settings', { headers: master });
     assert.equal(res.status, 200);
     assert.ok(!res.body.includes('super-secret-path'), 'secret value never echoed');
-    const grouped = res.json as { hot: Array<{ key: string; masked: boolean; isSet?: boolean }> };
+    const grouped = res.json as {
+      hot: Array<{ key: string; masked: boolean; isSet?: boolean }>;
+      restart: Array<{ key: string; masked: boolean; isSet?: boolean; value?: unknown }>;
+    };
     const teams = grouped.hot.find((f) => f.key === 'TEAMS_WEBHOOK_URL');
     assert.ok(teams);
     assert.equal(teams!.masked, true);
     assert.equal(teams!.isSet, true);
+
+    // The master API_KEY must never travel in cleartext (NFR-4/AC-25/AC-29).
+    assert.ok(!res.body.includes(API_KEY), 'master API_KEY never echoed');
+    const apiKeyField = grouped.restart.find((f) => f.key === 'API_KEY');
+    assert.ok(apiKeyField, 'API_KEY rendered as a masked field');
+    assert.equal(apiKeyField!.masked, true);
+    assert.equal(apiKeyField!.isSet, true);
+    assert.ok(!('value' in apiKeyField!), 'API_KEY carries no value property');
   } finally {
     await h.close();
   }
+});
+
+test('GET /api/settings masks BASIC_USER/BASIC_PASS and the master key (AC-25,29)', async () => {
+  const BASIC_USER = 'operator';
+  const BASIC_PASS = 'SECRET-BASIC-PASS';
+  const parsed = parseConfig({ AUTH_MODE: 'basic', BASIC_USER, BASIC_PASS });
+  assert.ok(parsed.success);
+  const base = parsed.data;
+  const { logger } = recordingLogger();
+  const fs = fakeFs();
+  const settingsStore = new SettingsStore({ file: 'config/settings.json', logger, ...fs });
+  const secretsStore = new SecretsStore({ file: 'config/secrets.json', logger, ...fs });
+  await settingsStore.load();
+  await secretsStore.load();
+  const handles: SettingsHandles = {
+    teams: { reconfigure: () => {} },
+    email: { reconfigure: () => {} },
+    engine: { setDefaultCooldownSec: () => {} },
+    digest: { setEnabled: () => {}, setDigestHour: () => {} },
+    errors: { setLogAppend: () => {} },
+    logger,
+  };
+  const settings = new SettingsService({ settingsStore, secretsStore, base, handles });
+  const grouped = settings.readEffective();
+  const all = [...grouped.hot, ...grouped.restart];
+  for (const key of ['BASIC_USER', 'BASIC_PASS']) {
+    const field = all.find((f) => f.key === key);
+    assert.ok(field, `${key} rendered`);
+    assert.equal(field!.masked, true, `${key} masked`);
+    assert.equal(field!.isSet, true, `${key} isSet`);
+    assert.ok(!('value' in field!), `${key} carries no value`);
+  }
+  const serialized = JSON.stringify(grouped);
+  assert.ok(!serialized.includes(BASIC_PASS), 'BASIC_PASS value never serialized');
 });
 
 test('DELETE /secrets/:field clears; unknown field -> 400', async () => {

@@ -53,6 +53,7 @@ export interface SecretsStoreOptions {
 
 export class SecretsValidationError extends Error {
   readonly code = 'VALIDATION';
+  readonly statusCode = 400;
   constructor(message: string) {
     super(message);
     this.name = 'SecretsValidationError';

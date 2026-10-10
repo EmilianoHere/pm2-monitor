@@ -58,7 +58,14 @@ const SECRET_KEYS: readonly SecretsOverlayKey[] = [
   'AGENT_TOKEN',
   'AGENT_TOKENS',
 ];
-const MASKED_KEYS = new Set<string>([...SECRET_KEYS, 'SERVER_URL']);
+/**
+ * Keys whose value is NEVER serialized in a GET response (set/not-set only):
+ * the four true secrets, SERVER_URL, and the master credentials (API_KEY,
+ * BASIC_USER, BASIC_PASS). The master credentials are plain members of
+ * AppConfig that readEffective would otherwise enumerate into plaintext, so
+ * they must be masked here (NFR-4 / AC-25 / AC-29).
+ */
+const MASKED_KEYS = new Set<string>([...SECRET_KEYS, 'SERVER_URL', 'API_KEY', 'BASIC_USER', 'BASIC_PASS']);
 
 /** One rendered field in the grouped settings view. */
 export interface SettingField {
@@ -93,6 +100,7 @@ export interface SettingsHandles {
 /** Thrown on a settings validation failure; the route maps it to 400. */
 export class SettingsValidationError extends Error {
   readonly code = 'VALIDATION';
+  readonly statusCode = 400;
   constructor(message: string) {
     super(message);
     this.name = 'SettingsValidationError';
