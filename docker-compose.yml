@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# pm2-monitor — SERVER (hub) mode via Docker Compose.
+# Copy .env.docker.example to .env and fill in real secrets before `up`.
+# Never commit .env.
+# ---------------------------------------------------------------------------
+
+services:
+  pm2-monitor:
+    build: .
+    # Alternatively use a pre-built image instead of building locally:
+    # image: pm2-monitor:latest
+    env_file:
+      - .env
+    environment:
+      # These override the .env to guarantee server/container-correct values.
+      MODE: server
+      HOST: 0.0.0.0
+      PORT: 3000
+      ALIAS_STORE_FILE: /app/config/agent-aliases.json
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persist operator-set agent aliases (write-temp-then-rename happens in
+      # this dir, so mount the directory, not a single file).
+      - pm2monitor-config:/app/config
+      # --- Native TLS (optional) ---
+      # Reverse-proxy TLS termination is the default. To terminate TLS in-process
+      # instead, uncomment the mount below and set TLS_CERT_FILE/TLS_KEY_FILE
+      # (see .env.docker.example):
+      # - ./certs:/app/certs:ro
+    restart: unless-stopped
+
+volumes:
+  pm2monitor-config: {}
