@@ -1,0 +1,44 @@
+pm2-monitor (SERVER / hub mode) has been deployed.
+
+1. Reach the hub dashboard / API:
+
+{{- if .Values.ingress.enabled }}
+   Via Ingress:
+   {{- range .Values.ingress.hosts }}
+   {{- $scheme := "http" }}
+   {{- if $.Values.ingress.tls }}{{ $scheme = "https" }}{{- end }}
+   {{- range .paths }}
+     {{ $scheme }}://{{ .host }}{{ .path }}
+   {{- end }}
+   {{- end }}
+{{- else }}
+   No Ingress is enabled. Use port-forward:
+
+     kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "pm2-monitor.fullname" . }} 3000:{{ .Values.service.port }}
+
+   Then open http://127.0.0.1:3000  (health: http://127.0.0.1:3000/api/system/health)
+{{- end }}
+
+2. Required secrets for server mode:
+
+{{- if .Values.secret.existingSecret }}
+   Using pre-created Secret: {{ .Values.secret.existingSecret }}
+   (must provide keys API_KEY and AGENT_TOKENS; optionally SMTP_PASS, TEAMS_WEBHOOK_URL)
+{{- else }}
+   A chart-managed Secret ({{ include "pm2-monitor.fullname" . }}-secret) holds
+   API_KEY and AGENT_TOKENS. Supply them at install time:
+
+     --set secret.apiKey=<random-key> --set secret.agentTokens=<tokenA,tokenB>
+
+   Or point secret.existingSecret at a pre-created Secret instead.
+{{- end }}
+
+3. Alias persistence:
+
+{{- if .Values.persistence.enabled }}
+   Agent aliases persist on the PVC ({{ include "pm2-monitor.fullname" . }}-config)
+   mounted at /app/config ({{ .Values.env.ALIAS_STORE_FILE }}).
+{{- else }}
+   persistence is DISABLED — agent aliases will NOT survive a pod restart.
+   Set persistence.enabled=true to keep them.
+{{- end }}
