@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTeamsCard } from './teams.js';
+import { buildTeamsCard, TeamsChannel } from './teams.js';
 import type { AlertPayload, AlertSeverity } from './types.js';
+import { createLogger } from '../../core/logger.js';
+
+const silent = createLogger({ level: 'error', sink: () => {} });
 
 function payload(partial: Partial<AlertPayload> = {}): AlertPayload {
   return {
@@ -61,4 +64,15 @@ test('buildTeamsCard adds a suppressed-count fact only when > 0', () => {
   const suppressed = some.sections[0].facts.find((f) => f.name === 'Suppressed');
   assert.ok(suppressed);
   assert.match(suppressed.value, /\+4 more since last alert/);
+});
+
+test('reconfigure enables and disables the channel observably', () => {
+  const channel = new TeamsChannel({ logger: silent });
+  assert.equal(channel.enabled, false);
+  channel.reconfigure('https://hooks.example/incoming');
+  assert.equal(channel.enabled, true);
+  channel.reconfigure(undefined);
+  assert.equal(channel.enabled, false);
+  channel.reconfigure('');
+  assert.equal(channel.enabled, false);
 });

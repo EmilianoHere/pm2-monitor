@@ -43,6 +43,16 @@ export interface EmailChannelOptions {
   createTransport?: (smtp: SmtpConfig) => MailTransport;
 }
 
+/** Default transport factory: a Nodemailer transport built from SMTP config. */
+function defaultNodemailerFactory(smtp: SmtpConfig): MailTransport {
+  return nodemailer.createTransport({
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    auth: { user: smtp.user, pass: smtp.pass },
+  }) as unknown as MailTransport;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -100,33 +110,43 @@ export class EmailChannel implements EmailChannelType {
   readonly name = 'email' as const;
   private enabledFlag: boolean;
 
-  private readonly smtp: SmtpConfig | undefined;
+  private smtp: SmtpConfig | undefined;
   private readonly logger: Logger;
-  private readonly transport: MailTransport | null;
+  private transport: MailTransport | null;
+  private readonly createTransport: (smtp: SmtpConfig) => MailTransport;
 
   constructor(options: EmailChannelOptions = {}) {
     this.smtp = options.smtp;
     this.logger = options.logger ?? createLogger();
+    this.createTransport = options.createTransport ?? defaultNodemailerFactory;
     this.enabledFlag = this.smtp !== undefined;
     if (!this.enabledFlag || this.smtp === undefined) {
       this.transport = null;
       this.logger.warnOnce('email-disabled', 'Email channel disabled: SMTP config not set');
       return;
     }
-    const factory =
-      options.createTransport ??
-      ((smtp: SmtpConfig): MailTransport =>
-        nodemailer.createTransport({
-          host: smtp.host,
-          port: smtp.port,
-          secure: smtp.secure,
-          auth: { user: smtp.user, pass: smtp.pass },
-        }) as unknown as MailTransport);
-    this.transport = factory(this.smtp);
+    this.transport = this.enabledFlag && this.smtp ? this.createTransport(this.smtp) : null;
   }
 
   get enabled(): boolean {
     return this.enabledFlag;
+  }
+
+  /**
+   * Live-applies new SMTP config. With no config the channel is disabled and no
+   * socket is opened; otherwise the transport is rebuilt through the retained
+   * factory seam and re-verified (verify is non-throwing and disables on failure).
+   */
+  reconfigure(smtp?: SmtpConfig): void {
+    this.smtp = smtp;
+    if (!smtp) {
+      this.transport = null;
+      this.enabledFlag = false;
+      return;
+    }
+    this.enabledFlag = true;
+    this.transport = this.createTransport(smtp);
+    void this.verify();
   }
 
   /**

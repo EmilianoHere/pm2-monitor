@@ -32,6 +32,9 @@ export const REDACTED_KEYS: ReadonlySet<string> = new Set([
   'AGENT_TOKEN',
   'AGENT_TOKENS',
   'SERVER_URL',
+  'rawKey',
+  'hash',
+  'apiKey',
 ]);
 
 const REDACTED = '***';
@@ -72,6 +75,11 @@ export interface Logger {
   warn(message: string, context?: LogContext): void;
   error(message: string, context?: LogContext): void;
   child(context: LogContext): Logger;
+  /**
+   * Re-levels the whole logger tree in place: the next emit on this logger and
+   * every child created from the same `createLogger` call honors `level`.
+   */
+  setLevel(level: LogLevel): void;
   /** Emits a warn at most once per `key` within `windowMs` (default 60s). */
   warnOnce(key: string, message: string, context?: LogContext): void;
   /** Returns true if an action keyed by `key` is allowed to run now (throttle). */
@@ -90,7 +98,8 @@ const DEFAULT_WINDOW_MS = 60_000;
 
 export function createLogger(options: LoggerOptions = {}): Logger {
   const level: LogLevel = options.level ?? 'info';
-  const threshold = LEVEL_ORDER[level];
+  // Mutable and captured by build() so a single setLevel re-levels every child.
+  let threshold = LEVEL_ORDER[level];
   const now = options.now ?? (() => Date.now());
   const sink =
     options.sink ??
@@ -119,6 +128,9 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       warn: (message, context) => emit('warn', bound, message, context),
       error: (message, context) => emit('error', bound, message, context),
       child: (context) => build({ ...bound, ...context }),
+      setLevel: (next) => {
+        threshold = LEVEL_ORDER[next];
+      },
       throttle: (key, windowMs = DEFAULT_WINDOW_MS) => {
         const last = throttleState.get(key);
         const current = now();

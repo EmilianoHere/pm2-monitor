@@ -109,3 +109,43 @@ test('throttle gates by key and window', () => {
   t += 1001;
   assert.equal(logger.throttle('a', 1000), true);
 });
+
+test('setLevel re-levels both the parent and a child logger', () => {
+  const { logger, lines } = capture('info');
+  const child = logger.child({ module: 'pm2' });
+  // Baseline: debug is below the info threshold on both.
+  logger.debug('p-before');
+  child.debug('c-before');
+  assert.equal(lines.length, 0);
+  // Lowering the level on the parent re-levels the whole tree (shared binding).
+  logger.setLevel('debug');
+  logger.debug('p-after');
+  child.debug('c-after');
+  assert.deepEqual(
+    lines.map((l) => l.msg),
+    ['p-after', 'c-after'],
+  );
+  // Raising it back suppresses debug again on both.
+  logger.setLevel('warn');
+  logger.debug('p-suppressed');
+  child.info('c-suppressed');
+  assert.equal(lines.length, 2);
+});
+
+test('rawKey/hash/apiKey redact to *** at nested object depth', () => {
+  const { logger, lines } = capture('info');
+  logger.info('key', {
+    generated: { rawKey: 'pmk_abcd1234', hash: 'deadbeef', apiKey: 'pmk_live' },
+  });
+  const generated = lines[0].generated as Record<string, unknown>;
+  assert.equal(generated.rawKey, '***');
+  assert.equal(generated.hash, '***');
+  assert.equal(generated.apiKey, '***');
+});
+
+test('a sibling non-secret `key` field is NOT redacted', () => {
+  const { logger, lines } = capture('info');
+  logger.info('store', { key: 'config/settings.json', id: 'abc' });
+  assert.equal(lines[0].key, 'config/settings.json');
+  assert.equal(lines[0].id, 'abc');
+});

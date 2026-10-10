@@ -77,9 +77,9 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 
 export class TeamsChannel implements AlertChannel {
   readonly name = 'teams' as const;
-  readonly enabled: boolean;
+  enabled: boolean;
 
-  private readonly webhookUrl: string | undefined;
+  private webhookUrl: string | undefined;
   private readonly logger: Logger;
   private readonly fetchFn: typeof fetch;
   private readonly timeoutMs: number;
@@ -93,6 +93,15 @@ export class TeamsChannel implements AlertChannel {
     if (!this.enabled) {
       this.logger.warnOnce('teams-disabled', 'Teams channel disabled: TEAMS_WEBHOOK_URL not set');
     }
+  }
+
+  /**
+   * Live-applies a new webhook URL: updates the target and recomputes `enabled`.
+   * The `send` path reads both per call, so no further wiring is needed.
+   */
+  reconfigure(webhookUrl?: string): void {
+    this.webhookUrl = webhookUrl;
+    this.enabled = typeof webhookUrl === 'string' && webhookUrl.length > 0;
   }
 
   /** POSTs the MessageCard; a non-2xx, network error, or timeout rejects. */

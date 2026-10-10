@@ -116,7 +116,7 @@ export class AlertEngine {
   private readonly events: MonitorEvents;
   private readonly errors: AlertErrorWindows;
   private readonly channels: AlertChannel[];
-  private readonly defaultCooldownSec: number;
+  private defaultCooldownSec: number;
   private readonly logger: Logger;
   private readonly cooldown: CooldownTracker;
   private readonly now: () => number;
@@ -154,6 +154,14 @@ export class AlertEngine {
     this.events.off('process:transition', this.onTransition);
     this.events.off('error:captured', this.onError);
     this.events.off('metrics:tick', this.onTick);
+  }
+
+  /**
+   * Live-applies a new default cooldown (DEFAULT_COOLDOWN_SEC). Read by `fire()`
+   * and `emitAgentOffline()` on every alert, so the next alert honors it.
+   */
+  setDefaultCooldownSec(n: number): void {
+    this.defaultCooldownSec = Math.max(0, n);
   }
 
   /** Replaces the rule set and recomputes the error-tracker max window. */

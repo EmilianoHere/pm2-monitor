@@ -51,8 +51,8 @@ export class DigestScheduler {
   private readonly email: EmailChannel;
   private readonly source: DigestDataSource;
   private readonly counters: AlertCounters;
-  private readonly digestHour: number;
-  private readonly enabled: boolean;
+  private digestHour: number;
+  private enabled: boolean;
   private readonly errorBufferSize: number;
   private readonly topN: number;
   private readonly logger: Logger;
@@ -89,6 +89,32 @@ export class DigestScheduler {
     }
     this.stopped = false;
     this.schedule();
+  }
+
+  /**
+   * Live-applies DIGEST_ENABLED: start the schedule when turning on, stop it
+   * when turning off.
+   */
+  setEnabled(b: boolean): void {
+    this.enabled = b;
+    if (this.enabled) {
+      this.start();
+    } else {
+      this.stop();
+    }
+  }
+
+  /**
+   * Live-applies DIGEST_HOUR (clamped 0..23): cancels the pending timer and
+   * re-schedules so the next fire uses the new hour.
+   */
+  setDigestHour(n: number): void {
+    this.digestHour = Math.min(23, Math.max(0, Math.floor(n)));
+    this.stop();
+    if (this.enabled && this.email.enabled) {
+      this.stopped = false;
+      this.schedule();
+    }
   }
 
   /** Cancels the pending timer. */

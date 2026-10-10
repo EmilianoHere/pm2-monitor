@@ -104,7 +104,7 @@ interface ProcessBucket {
 export class ErrorTracker {
   private readonly events: MonitorEvents;
   private readonly bufferSize: number;
-  private readonly logAppend: boolean;
+  private logAppend: boolean;
   private readonly logFile: string;
   private readonly logger: Logger;
   private readonly now: () => number;
@@ -122,6 +122,14 @@ export class ErrorTracker {
     this.logger = options.logger ?? createLogger();
     this.now = options.now ?? (() => Date.now());
     this.events.on('error:captured', this.onCaptured);
+  }
+
+  /**
+   * Live-applies ERROR_LOG_APPEND. Read by `appendRaw()` on each capture, so the
+   * toggle takes effect on the next captured error.
+   */
+  setLogAppend(b: boolean): void {
+    this.logAppend = b;
   }
 
   /** Detaches the event listener. */

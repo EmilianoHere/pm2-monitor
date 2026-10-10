@@ -504,3 +504,25 @@ test('a rule targeting a disabled channel is skipped for that channel only', asy
   assert.equal(email.sent.length, 1);
   engine.stop();
 });
+
+test('setDefaultCooldownSec changes the cooldown applied to the next alert', async () => {
+  // A rule with no cooldownSec of its own falls back to defaultCooldownSec.
+  const h = makeEngine([rule({ id: 'crash', match: { processes: ['*'], condition: { type: 'errored' } } })]);
+  h.state.setProcess('api');
+
+  // First alert is allowed; a second within the 300s default is suppressed.
+  h.events.emit('process:transition', { name: 'api', from: 'online', to: 'errored', at: h.now.t });
+  await flush();
+  h.now.t += 1000; // 1s later, well within 300s
+  h.events.emit('process:transition', { name: 'api', from: 'online', to: 'errored', at: h.now.t });
+  await flush();
+  assert.equal(h.teams.sent.length, 1, 'second alert suppressed by the 300s default');
+
+  // Lower the default to 0: the very next alert is no longer suppressed.
+  h.engine.setDefaultCooldownSec(0);
+  h.now.t += 1000;
+  h.events.emit('process:transition', { name: 'api', from: 'online', to: 'errored', at: h.now.t });
+  await flush();
+  assert.equal(h.teams.sent.length, 2, 'alert allowed after cooldown lowered to 0');
+  h.engine.stop();
+});

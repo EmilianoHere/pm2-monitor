@@ -193,3 +193,70 @@ test('start does nothing when the email channel is not configured', () => {
   digest.stop();
   assert.equal(email.sent.length, 0);
 });
+
+// --- hot-apply setters (setEnabled / setDigestHour) ---
+
+/** A scheduler whose timers are observable: records every scheduled delay. */
+function makeInstrumented(opts: { now: number; digestHour: number; enabled: boolean }) {
+  const nowRef = { t: opts.now };
+  const email = new FakeEmail(true);
+  const scheduled: number[] = [];
+  let cleared = 0;
+  let handleSeq = 1;
+  const digest = new DigestScheduler({
+    email,
+    source: source([proc('api')]),
+    counters: counters(0, 0),
+    digestHour: opts.digestHour,
+    enabled: opts.enabled,
+    errorBufferSize: 500,
+    topN: 3,
+    logger: silent,
+    now: () => nowRef.t,
+    setTimer: (_fn, ms) => {
+      scheduled.push(ms);
+      return handleSeq++ as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimer: () => {
+      cleared++;
+    },
+  });
+  return { digest, scheduled, nowRef, counts: () => ({ scheduled: scheduled.length, cleared }) };
+}
+
+test('setEnabled(true) starts the schedule and setEnabled(false) stops it', () => {
+  const base = new Date(2024, 0, 2, 6, 0, 0, 0).getTime();
+  const h = makeInstrumented({ now: base, digestHour: 8, enabled: false });
+  // Disabled start schedules nothing.
+  h.digest.start();
+  assert.equal(h.counts().scheduled, 0);
+
+  // Turning on schedules a timer.
+  h.digest.setEnabled(true);
+  assert.equal(h.counts().scheduled, 1);
+
+  // Turning off clears the pending timer.
+  h.digest.setEnabled(false);
+  assert.equal(h.counts().cleared, 1);
+});
+
+test('setDigestHour re-schedules so the next fire uses the new hour', () => {
+  const base = new Date(2024, 0, 2, 6, 0, 0, 0).getTime();
+  const h = makeInstrumented({ now: base, digestHour: 8, enabled: true });
+  h.digest.start();
+  // Initial schedule: 2h out (06:00 -> 08:00).
+  assert.equal(h.scheduled.at(-1), 2 * 60 * 60 * 1000);
+
+  // Move the hour to 10: next fire is now 4h out, and a re-schedule happened.
+  h.digest.setDigestHour(10);
+  assert.equal(h.scheduled.at(-1), 4 * 60 * 60 * 1000);
+  assert.equal(h.scheduled.length, 2);
+});
+
+test('setDigestHour clamps out-of-range values to 0..23', () => {
+  const base = new Date(2024, 0, 2, 6, 0, 0, 0).getTime();
+  const h = makeInstrumented({ now: base, digestHour: 8, enabled: true });
+  h.digest.setDigestHour(99);
+  // Clamped to 23: next fire is today at 23:00, i.e. 17h out.
+  assert.equal(h.scheduled.at(-1), 17 * 60 * 60 * 1000);
+});

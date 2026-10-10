@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MonitorEvents } from '../core/events.js';
 import { ErrorTracker } from './tracker.js';
 import { createLogger } from '../core/logger.js';
@@ -120,4 +123,40 @@ test('drop removes all state for a process', () => {
   tracker.drop('api');
   assert.equal(tracker.list('api').length, 0);
   assert.equal(tracker.countInWindow('api', 60), 0);
+});
+
+test('setLogAppend toggles raw-append behavior on each capture', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pm2mon-tracker-'));
+  const logFile = join(dir, 'errors.log');
+  try {
+    const events = new MonitorEvents();
+    let t = 80_000_000;
+    const tracker = new ErrorTracker({
+      events,
+      bufferSize: 500,
+      logAppend: false,
+      logFile,
+      logger: silent,
+      now: () => t,
+    });
+
+    // Disabled: no file written.
+    events.emit('error:captured', err({ processName: 'api', level: 'error', sample: 'a' }));
+    assert.equal(existsSync(logFile), false);
+
+    // Enable live: the next capture is appended.
+    tracker.setLogAppend(true);
+    t += 1000;
+    events.emit('error:captured', err({ processName: 'api', level: 'error', sample: 'b' }));
+    assert.equal(existsSync(logFile), true);
+    assert.equal(readFileSync(logFile, 'utf8').trim().split('\n').length, 1);
+
+    // Disable again: no further append.
+    tracker.setLogAppend(false);
+    t += 1000;
+    events.emit('error:captured', err({ processName: 'api', level: 'error', sample: 'c' }));
+    assert.equal(readFileSync(logFile, 'utf8').trim().split('\n').length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -26,7 +26,7 @@ const booleanish = z
 /** Coerces a string env var to a finite number. */
 const numeric = z.coerce.number();
 
-export const configSchema = z
+export const configObjectSchema = z
   .object({
     PORT: numeric.int().min(1).max(65535).default(3000),
     HOST: z.string().min(1).default('127.0.0.1'),
@@ -94,7 +94,9 @@ export const configSchema = z
       (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
       z.string().min(1).optional(),
     ),
-  })
+  });
+
+export const configSchema = configObjectSchema
   .superRefine((cfg, ctx) => {
     if (cfg.AUTH_MODE === 'apikey' && !cfg.API_KEY) {
       ctx.addIssue({
@@ -213,6 +215,43 @@ export const configSchema = z
   });
 
 export type AppConfig = z.infer<typeof configSchema>;
+
+/**
+ * Keys the settings overlay may carry: every NON-secret editable env key (both
+ * HOT and RESTART groups). Explicitly EXCLUDES the four secret keys, which live
+ * only in the secrets overlay (design §4.1).
+ */
+export type SettingsOverlayKey = Exclude<
+  keyof AppConfig,
+  'SMTP_PASS' | 'TEAMS_WEBHOOK_URL' | 'AGENT_TOKEN' | 'AGENT_TOKENS'
+>;
+export type SettingsOverlay = Partial<Pick<AppConfig, SettingsOverlayKey>>;
+
+/** Keys the secrets overlay may carry (the four editable secrets, design §2.3). */
+export type SecretsOverlayKey = 'SMTP_PASS' | 'TEAMS_WEBHOOK_URL' | 'AGENT_TOKEN' | 'AGENT_TOKENS';
+export type SecretsOverlay = Partial<Pick<AppConfig, SecretsOverlayKey>>;
+
+/**
+ * The PUT /api/settings body schema: a partial of ANY editable key (secret or
+ * non-secret). `.strict()` rejects unknown keys with a per-field message. Derived
+ * from the pre-refine object schema so no cross-field guard fires on a partial.
+ */
+export const settingsPatchSchema = configObjectSchema.partial().strict();
+
+/**
+ * Builds the effective config in precedence order `.env defaults -> settings
+ * overlay -> secrets overlay`, re-parsing the merged object through the FULL
+ * `configSchema` (`.superRefine` included) so every cross-field guard applies.
+ * Re-parsing an already-coerced `AppConfig` is idempotent, so empty overlays
+ * yield a result deep-equal to `base` (design §4.1).
+ */
+export function mergeEffectiveConfig(
+  base: AppConfig,
+  overlay: SettingsOverlay,
+  secrets: SecretsOverlay,
+): Readonly<AppConfig> {
+  return Object.freeze(configSchema.parse({ ...base, ...overlay, ...secrets }));
+}
 
 /**
  * Pure parse of an env-like record. Returns a zod SafeParseReturn so callers
