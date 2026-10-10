@@ -252,6 +252,17 @@ project root (so dotenv loads the project-root `.env`), for example with
 `WorkingDirectory=/path/to/pm2-monitor` and `ExecStart=/usr/bin/node dist/index.js`.
 The same secrets-in-`.env` guidance applies.
 
+## Deployment (Docker & Kubernetes)
+
+Server (hub) mode ships with a repo-root `Dockerfile` and `docker-compose.yml`,
+plus a Helm chart under [`deploy/helm/pm2-monitor/`](./deploy/helm/pm2-monitor/)
+for Kubernetes. Agents are not containerized — they run natively next to each
+host's PM2 and dial the hub outbound over `wss://`.
+
+See [DEPLOY.md](./DEPLOY.md) for full instructions covering the Docker image,
+Docker Compose, the Helm chart (secrets, Ingress TLS, alias-store PVC),
+connecting native agents, and secret handling.
+
 ## Authentication
 
 Every `/api/*` endpoint requires auth **except** `GET /api/system/health`. The
