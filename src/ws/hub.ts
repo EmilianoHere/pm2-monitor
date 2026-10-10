@@ -24,7 +24,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Logger } from '../core/logger.js';
 import type { MonitorEvents, ProcessTransitionEvent, LogLineEvent, AlertEvent } from '../core/events.js';
 import type { MonitorSnapshot } from '../core/types.js';
-import { validateWsCredential, type AuthConfig } from '../api/auth.js';
+import { validateWsCredential, type AuthConfig, type KeyVerifier } from '../api/auth.js';
 import { agentIdSchema } from '../protocol/shapes.js';
 import { processNameSchema } from '../api/schemas.js';
 
@@ -78,6 +78,11 @@ export interface WsHubOptions {
   server: Server;
   events: MonitorEvents;
   auth: AuthConfig;
+  /**
+   * Optional secondary-key verifier (apikey mode). When set, an active secondary
+   * key authenticates a WS upgrade too. Undefined → byte-identical to today.
+   */
+  keys?: KeyVerifier;
   logger: Logger;
   /** supplies the current snapshot for the hello frame + throttled state. */
   snapshot: () => MonitorSnapshot;
@@ -98,6 +103,7 @@ export class WsHub {
   private readonly server: Server;
   private readonly events: MonitorEvents;
   private readonly auth: AuthConfig;
+  private readonly keys: KeyVerifier | undefined;
   private readonly logger: Logger;
   private readonly getSnapshot: () => MonitorSnapshot;
   private readonly now: () => number;
@@ -124,6 +130,7 @@ export class WsHub {
     this.server = options.server;
     this.events = options.events;
     this.auth = options.auth;
+    this.keys = options.keys;
     this.logger = options.logger;
     this.getSnapshot = options.snapshot;
     this.now = options.now ?? (() => Date.now());
@@ -189,7 +196,7 @@ export class WsHub {
     }
 
     const credential = this.extractCredential(req);
-    const authed = validateWsCredential(this.auth, credential);
+    const authed = validateWsCredential(this.auth, credential, this.keys).ok;
     // NEVER log req.url on the upgrade path — only the fixed path + authed flag.
     this.logger.debug('ws upgrade', { path: '/ws', authed });
 

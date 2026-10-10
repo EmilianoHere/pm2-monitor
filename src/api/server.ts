@@ -20,11 +20,14 @@ import type { LogLine } from '../core/types.js';
 import type { AlertRule } from '../config/alertRules.js';
 import type { RecentAlert } from '../alerts/engine.js';
 import type { RequestSchemas } from './schemas.js';
-import { createAuthMiddleware, type AuthConfig } from './auth.js';
+import { createAuthMiddleware, requireMaster, type AuthConfig, type KeyVerifier } from './auth.js';
 import { createHealthRouter, createSystemRouter } from './routes/system.js';
 import { createProcessesRouter } from './routes/processes.js';
 import { createErrorsRouter } from './routes/errors.js';
 import { createAlertsRouter, createMaintenanceRouter } from './routes/alerts.js';
+import { createSettingsRouter } from './routes/settings.js';
+import type { ApiKeyService } from '../server/apiKeyStore.js';
+import type { SettingsService } from '../config/settingsService.js';
 
 // --- narrow dependency surfaces (so integration tests inject fakes) ---
 
@@ -69,6 +72,15 @@ export interface ApiDeps {
   errors: ErrorsDeps;
   schemas: RequestSchemas;
   auth: AuthConfig;
+  /**
+   * Optional secondary-key verifier threaded into the auth middleware (apikey
+   * mode). Omitted (existing tests) → auth is byte-identical to today.
+   */
+  keys?: KeyVerifier;
+  /** Optional api-key management service; required to mount /api/settings. */
+  apiKeys?: ApiKeyService;
+  /** Optional settings orchestration service; required to mount /api/settings. */
+  settings?: SettingsService;
   logger: Logger;
   /** static asset root; defaults to the on-disk public/ dir. */
   publicDir: string;
@@ -110,7 +122,7 @@ export function createServer(deps: ApiDeps): Server {
   app.use('/api/system', createHealthRouter(deps));
 
   // Everything else under /api requires auth.
-  const auth = createAuthMiddleware(deps.auth);
+  const auth = createAuthMiddleware(deps.auth, deps.keys);
   app.use('/api', auth);
 
   app.use('/api/system', createSystemRouter(deps));
@@ -118,6 +130,12 @@ export function createServer(deps: ApiDeps): Server {
   app.use('/api/errors', createErrorsRouter(deps));
   app.use('/api/alerts', createAlertsRouter(deps));
   app.use('/api/maintenance', createMaintenanceRouter(deps));
+
+  // Settings (master-only). Guarded so existing deps-less tests are unchanged:
+  // the global /api auth already 401s a bad credential before requireMaster.
+  if (deps.settings && deps.apiKeys) {
+    app.use('/api/settings', requireMaster, createSettingsRouter(deps));
+  }
 
   // Static dashboard shell (unauthenticated); the browser then supplies creds.
   app.use('/', express.static(deps.publicDir));

@@ -36,6 +36,11 @@ import { createServer, type ApiDeps, type ReloadRulesResult } from '../api/serve
 import { buildSchemas } from '../api/schemas.js';
 import { WsHub } from '../ws/hub.js';
 import type { AuthConfig } from '../api/auth.js';
+import { ApiKeyStore, ApiKeyService } from '../server/apiKeyStore.js';
+import { SettingsStore } from '../config/settingsStore.js';
+import { SecretsStore } from '../config/secretsStore.js';
+import { SettingsService } from '../config/settingsService.js';
+import { mergeEffectiveConfig } from '../config/env.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /**
@@ -71,18 +76,31 @@ export function buildAuthConfig(cfg: AppConfig): AuthConfig {
 
 /** Boots the standalone single-process monitor. */
 export async function bootstrapStandalone(config: Readonly<AppConfig>, logger: Logger): Promise<void> {
-  let rules = loadAlertRules(config.ALERT_RULES_FILE, logger);
+  // --- settings overlay stores (design §4.1 boot wiring) ---
+  // With no config/*.json files these start empty and `merged` equals `config`
+  // byte-for-byte (mergeEffectiveConfig is idempotent on empty overlays), so a
+  // standalone boot creates no new file and behaves identically to today.
+  const apiKeyStore = new ApiKeyStore({ file: 'config/api-keys.json', logger });
+  const settingsStore = new SettingsStore({ file: 'config/settings.json', logger });
+  const secretsStore = new SecretsStore({ file: 'config/secrets.json', logger });
+  await apiKeyStore.load();
+  await settingsStore.load();
+  await secretsStore.load();
+  const apiKeys = new ApiKeyService(apiKeyStore);
+  const merged = mergeEffectiveConfig(config, settingsStore.get(), secretsStore.get());
+
+  let rules = loadAlertRules(merged.ALERT_RULES_FILE, logger);
 
   // --- core hub ---
   const events = new MonitorEvents();
   const metrics = new MetricsStore({
-    retentionMin: config.METRICS_RETENTION_MIN,
-    sampleSec: config.METRICS_SAMPLE_SEC,
+    retentionMin: merged.METRICS_RETENTION_MIN,
+    sampleSec: merged.METRICS_SAMPLE_SEC,
   });
   const errors = new ErrorTracker({
     events,
-    bufferSize: config.ERROR_BUFFER_SIZE,
-    logAppend: config.ERROR_LOG_APPEND,
+    bufferSize: merged.ERROR_BUFFER_SIZE,
+    logAppend: merged.ERROR_LOG_APPEND,
     logger,
   });
   // MonitorState subscribes to metrics:tick in its ctor — construct it BEFORE
@@ -91,10 +109,10 @@ export async function bootstrapStandalone(config: Readonly<AppConfig>, logger: L
 
   // --- channels ---
   const teams = new TeamsChannel({
-    ...(config.TEAMS_WEBHOOK_URL !== undefined ? { webhookUrl: config.TEAMS_WEBHOOK_URL } : {}),
+    ...(merged.TEAMS_WEBHOOK_URL !== undefined ? { webhookUrl: merged.TEAMS_WEBHOOK_URL } : {}),
     logger,
   });
-  const smtp = buildSmtpConfig(config);
+  const smtp = buildSmtpConfig(merged);
   const email = new EmailChannel({ ...(smtp !== undefined ? { smtp } : {}), logger });
   await email.verify();
   const channels: AlertChannel[] = [teams, email];
@@ -113,7 +131,7 @@ export async function bootstrapStandalone(config: Readonly<AppConfig>, logger: L
     events,
     errors,
     channels,
-    defaultCooldownSec: config.DEFAULT_COOLDOWN_SEC,
+    defaultCooldownSec: merged.DEFAULT_COOLDOWN_SEC,
     logger,
   });
 
@@ -148,12 +166,12 @@ export async function bootstrapStandalone(config: Readonly<AppConfig>, logger: L
   };
 
   // --- HTTP + WS ---
-  const schemas = buildSchemas({ allowedScriptRoot: config.ALLOWED_SCRIPT_ROOT });
+  const schemas = buildSchemas({ allowedScriptRoot: merged.ALLOWED_SCRIPT_ROOT });
   const startedAt = Date.now();
   const reloadRules = (): ReloadRulesResult => {
     let raw: string;
     try {
-      raw = readFileSync(config.ALERT_RULES_FILE, 'utf8');
+      raw = readFileSync(merged.ALERT_RULES_FILE, 'utf8');
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') return { ok: true, rules: [] };
@@ -175,6 +193,32 @@ export async function bootstrapStandalone(config: Readonly<AppConfig>, logger: L
     return { ok: true, rules: result.data.rules };
   };
 
+  // --- daily digest (constructed before the server so the SettingsService can
+  // hold its live handle; started after listen below). ---
+  const digest = new DigestScheduler({
+    email,
+    source: {
+      processes: () => state.snapshot().processes,
+      trackedErrors: (name) => errors.list(name),
+    },
+    counters: {
+      dispatched: () => dispatchedCount,
+      suppressed: () => suppressedCount,
+    },
+    digestHour: merged.DIGEST_HOUR,
+    enabled: merged.DIGEST_ENABLED,
+    errorBufferSize: merged.ERROR_BUFFER_SIZE,
+    logger,
+  });
+
+  // --- settings service (hot-apply orchestration over the live handles) ---
+  const settingsService = new SettingsService({
+    settingsStore,
+    secretsStore,
+    base: config,
+    handles: { teams, email, engine, digest, errors, logger },
+  });
+
   const deps: ApiDeps = {
     state,
     pm2,
@@ -182,6 +226,9 @@ export async function bootstrapStandalone(config: Readonly<AppConfig>, logger: L
     errors,
     schemas,
     auth: buildAuthConfig(config),
+    keys: apiKeyStore,
+    apiKeys,
+    settings: settingsService,
     logger,
     publicDir: PUBLIC_DIR,
     version: '1.0.0',
@@ -199,13 +246,14 @@ export async function bootstrapStandalone(config: Readonly<AppConfig>, logger: L
     server,
     events,
     auth: deps.auth,
+    keys: apiKeyStore,
     logger,
     snapshot: () => state.snapshot(),
   });
 
   await new Promise<void>((resolve) => {
-    server.listen(config.PORT, config.HOST, () => {
-      logger.info('listening', { host: config.HOST, port: config.PORT });
+    server.listen(merged.PORT, merged.HOST, () => {
+      logger.info('listening', { host: merged.HOST, port: merged.PORT });
       resolve();
     });
   });
@@ -222,8 +270,8 @@ export async function bootstrapStandalone(config: Readonly<AppConfig>, logger: L
         state,
         events,
         logger,
-        sampleSec: config.METRICS_SAMPLE_SEC,
-        graceMs: config.INTENTIONAL_ACTION_GRACE_MS,
+        sampleSec: merged.METRICS_SAMPLE_SEC,
+        graceMs: merged.INTENTIONAL_ACTION_GRACE_MS,
       });
       pm2Client = client;
       client.start();
@@ -235,21 +283,6 @@ export async function bootstrapStandalone(config: Readonly<AppConfig>, logger: L
   })();
 
   // --- daily digest ---
-  const digest = new DigestScheduler({
-    email,
-    source: {
-      processes: () => state.snapshot().processes,
-      trackedErrors: (name) => errors.list(name),
-    },
-    counters: {
-      dispatched: () => dispatchedCount,
-      suppressed: () => suppressedCount,
-    },
-    digestHour: config.DIGEST_HOUR,
-    enabled: config.DIGEST_ENABLED,
-    errorBufferSize: config.ERROR_BUFFER_SIZE,
-    logger,
-  });
   digest.start();
 
   // --- graceful shutdown ---

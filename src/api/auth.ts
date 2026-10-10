@@ -32,6 +32,45 @@ export type AuthConfig =
   | { mode: 'apikey'; apiKey: string }
   | { mode: 'basic'; user: string; pass: string };
 
+/** The outcome of an auth check: whether it passed and whether it was master. */
+export interface AuthResult {
+  ok: boolean;
+  isMaster: boolean;
+}
+
+/**
+ * The pure, synchronous key-set reader auth consults for secondary keys. Backed
+ * by the ApiKeyStore's in-memory active-hash set, so auth never awaits fs.
+ */
+export interface KeyVerifier {
+  /** sha-256 hex digests of every ACTIVE key currently in the store. */
+  activeHashes(): readonly string[];
+}
+
+/** sha-256 hex digest helper (matches the ApiKeyStore at-rest representation). */
+function sha256hex(s: string): string {
+  return createHash('sha256').update(s).digest('hex');
+}
+
+/**
+ * The constant-time, throw-safe apikey verification algorithm (design §1.3).
+ * Master is checked against `config.apiKey` (`.env`), independent of the key
+ * store, so a corrupt/missing store never removes it (anti-lockout). Secondary
+ * keys are compared with a NON-short-circuiting OR over every active hash (no
+ * `break`), so timing never reveals which candidate matched and the loop can
+ * never throw (every comparison is `safeEqual`).
+ */
+function verifyApiKey(provided: string, apiKey: string, keys?: KeyVerifier): AuthResult {
+  const master = provided.length > 0 && safeEqual(provided, apiKey);
+  const providedHash = sha256hex(provided);
+  let secondary = false;
+  for (const h of keys?.activeHashes() ?? []) {
+    secondary = safeEqual(providedHash, h) || secondary;
+  }
+  const ok = master || secondary;
+  return { ok, isMaster: master };
+}
+
 interface ApiError extends Error {
   statusCode?: number;
   code?: string;
@@ -77,11 +116,13 @@ function extractBasic(req: Request): { user: string; pass: string } {
  * Builds the Express auth middleware for the configured mode. Every comparison
  * goes through `safeEqual`, so no length mismatch can throw.
  */
-export function createAuthMiddleware(config: AuthConfig) {
+export function createAuthMiddleware(config: AuthConfig, keys?: KeyVerifier) {
   return function auth(req: Request, res: Response, next: NextFunction): void {
     if (config.mode === 'apikey') {
       const provided = extractApiKey(req);
-      if (provided.length > 0 && safeEqual(provided, config.apiKey)) {
+      const result = verifyApiKey(provided, config.apiKey, keys);
+      if (result.ok) {
+        res.locals.auth = { isMaster: result.isMaster };
         next();
         return;
       }
@@ -89,10 +130,13 @@ export function createAuthMiddleware(config: AuthConfig) {
       return;
     }
     // basic mode — both user AND pass must pass, each a safeEqual call.
+    // Secondary keys are inert as credentials in basic mode (ignore `keys`); a
+    // basic-authenticated caller is always master.
     const { user, pass } = extractBasic(req);
     const userOk = safeEqual(user, config.user);
     const passOk = safeEqual(pass, config.pass);
     if (userOk && passOk) {
+      res.locals.auth = { isMaster: true };
       next();
       return;
     }
@@ -101,26 +145,41 @@ export function createAuthMiddleware(config: AuthConfig) {
 }
 
 /**
+ * Master-only guard mounted AFTER the global `/api` auth middleware, so an
+ * unauthenticated request is already 401 before this runs; a valid secondary
+ * key reaches here and gets 403. Reads the `isMaster` signal auth wrote to
+ * `res.locals.auth`.
+ */
+export function requireMaster(_req: Request, res: Response, next: NextFunction): void {
+  if (res.locals.auth?.isMaster === true) {
+    next();
+    return;
+  }
+  res.status(403).json({ error: { code: 'FORBIDDEN', message: 'master credential required' } });
+}
+
+/**
  * Validates a raw WS-upgrade credential against the configured auth, reusing the
  * same `safeEqual`. For apikey mode the credential is the key; for basic mode it
  * is a base64 of `user:pass` (so the browser's single subprotocol code path
  * serves both modes). Never throws.
  */
-export function validateWsCredential(config: AuthConfig, credential: string): boolean {
-  if (typeof credential !== 'string' || credential.length === 0) return false;
+export function validateWsCredential(config: AuthConfig, credential: string, keys?: KeyVerifier): AuthResult {
+  if (typeof credential !== 'string' || credential.length === 0) return { ok: false, isMaster: false };
   if (config.mode === 'apikey') {
-    return safeEqual(credential, config.apiKey);
+    return verifyApiKey(credential, config.apiKey, keys);
   }
   let decoded = '';
   try {
     decoded = Buffer.from(credential, 'base64').toString('utf8');
   } catch {
-    return false;
+    return { ok: false, isMaster: false };
   }
   const idx = decoded.indexOf(':');
   const user = idx === -1 ? decoded : decoded.slice(0, idx);
   const pass = idx === -1 ? '' : decoded.slice(idx + 1);
-  return safeEqual(user, config.user) && safeEqual(pass, config.pass);
+  const ok = safeEqual(user, config.user) && safeEqual(pass, config.pass);
+  return { ok, isMaster: ok };
 }
 
 /** Helper to construct a typed API error carrying an HTTP status + envelope code. */

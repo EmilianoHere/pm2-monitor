@@ -302,3 +302,35 @@ export function buildSchemas(opts: SchemaOptions = {}): RequestSchemas {
 }
 
 export { MAX_LINES, DEFAULT_LINES, ONE_HOUR_MS, MAX_ERRORS_LIMIT, MAX_RECENT_LIMIT };
+
+// --- Settings feature request schemas (design §5) ---
+
+import { settingsPatchSchema } from '../config/env.js';
+
+/** The four editable secret field names (also the DELETE /secrets/:field enum). */
+export const secretFields = ['SMTP_PASS', 'TEAMS_WEBHOOK_URL', 'AGENT_TOKEN', 'AGENT_TOKENS'] as const;
+
+/** PUT /api/settings — a partial of any editable key (secret or non-secret). */
+export const settingsPut = z.object({ body: settingsPatchSchema });
+
+/** A key label: trimmed, 1–100 chars. Shared by POST + PATCH keys. */
+const keyLabelBody = z.object({ label: z.string().trim().min(1).max(100) }).strict();
+
+/** POST /api/settings/keys — generate a key with a label. */
+export const keyGenerate = z.object({ body: keyLabelBody });
+
+/** PATCH /api/settings/keys/:id — relabel a key. */
+export const keyRelabel = z.object({
+  params: z.object({ id: z.string().uuid() }),
+  body: keyLabelBody,
+});
+
+/** DELETE /api/settings/secrets/:field — clear a single secret. */
+export const secretFieldParam = z.object({
+  params: z.object({ field: z.enum(secretFields) }),
+});
+
+/** DELETE /api/settings/keys/:id — revoke a key. */
+export const keyIdParam = z.object({
+  params: z.object({ id: z.string().uuid() }),
+});
