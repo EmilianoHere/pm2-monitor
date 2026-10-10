@@ -17,10 +17,13 @@ export class LogsView {
    * @param {import('../ws.js').WsClient} opts.ws
    * @param {(msg:string, kind?:string)=>void} opts.toast
    */
-  constructor({ root, ws, toast }) {
+  constructor({ root, ws, toast, agentId }) {
     this.root = root;
     this.ws = ws;
     this.toast = toast;
+    // Optional agent scope (server mode). Undefined in standalone, so the WS
+    // frame and REST path below are byte-identical to today.
+    this.agentId = agentId;
     this.process = null;
     this.buffer = []; // { stream, level, line, ts }
     this.q = '';
@@ -33,16 +36,21 @@ export class LogsView {
     this.buffer = [];
     this.renderShell();
 
-    // Live subscription.
+    // Live subscription. In server mode the relayed `log` frame also carries an
+    // `agentId`, so match on both; in standalone `agentId` is undefined on both
+    // sides and the comparison is unchanged.
     this.offLog = this.ws.on('log', (msg) => {
       if (msg.process !== this.process) return;
+      if (this.agentId && msg.agentId !== this.agentId) return;
       this.append({ stream: msg.stream, level: msg.level, line: msg.line, ts: msg.ts });
     });
-    this.ws.logSubscribe(name, ['out', 'err']);
+    this.ws.logSubscribe(name, ['out', 'err'], this.agentId);
 
     // Initial backfill.
     try {
-      const res = await api.logs(name, { lines: 200, stream: 'all' });
+      const res = this.agentId
+        ? await api.agentLogs(this.agentId, name, { lines: 200, stream: 'all' })
+        : await api.logs(name, { lines: 200, stream: 'all' });
       for (const l of res.lines) this.buffer.push(l);
       this.trim();
       this.renderLines();
@@ -56,7 +64,7 @@ export class LogsView {
       this.offLog();
       this.offLog = null;
     }
-    if (this.process) this.ws.logUnsubscribe(this.process);
+    if (this.process) this.ws.logUnsubscribe(this.process, this.agentId);
     this.process = null;
   }
 

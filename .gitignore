@@ -10,6 +10,10 @@ dist/
 .env
 # Runtime logs directory
 logs/
+# Server-mode persisted data: the agent-id suffix (agent mode) and the operator
+# alias map (server mode) are per-deployment runtime state, never committed.
+config/agent-id
+config/agent-aliases.json
 
 # Compiled Java class files
 *.class

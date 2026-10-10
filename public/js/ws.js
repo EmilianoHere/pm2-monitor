@@ -19,7 +19,10 @@ export class WsClient {
 
     // Subscriptions that must survive a reconnect.
     this.channels = new Set();
-    this.logSubs = new Map(); // process -> array of streams
+    // key -> { process, streams, agentId? }. The key is `process` in standalone
+    // and `${agentId}/${process}` in server mode so the same process name can be
+    // subscribed on more than one agent without colliding.
+    this.logSubs = new Map();
 
     // type -> Set<handler>
     this.listeners = new Map();
@@ -89,9 +92,20 @@ export class WsClient {
     if (this.channels.size > 0) {
       this.send({ type: 'subscribe', channels: [...this.channels] });
     }
-    for (const [process, streams] of this.logSubs) {
-      this.send({ type: 'log:subscribe', process, streams });
+    for (const sub of this.logSubs.values()) {
+      this.sendLogSubscribe(sub);
     }
+  }
+
+  /**
+   * Sends one log:subscribe frame. With no `agentId` the frame is byte-identical
+   * to the standalone frame (`{ type, process, streams }`); `agentId` is only
+   * added when present (server-mode relay path).
+   */
+  sendLogSubscribe({ process, streams, agentId }) {
+    const frame = { type: 'log:subscribe', process, streams };
+    if (agentId) frame.agentId = agentId;
+    this.send(frame);
   }
 
   send(obj) {
@@ -106,14 +120,19 @@ export class WsClient {
     this.send({ type: 'subscribe', channels: [...this.channels] });
   }
 
-  logSubscribe(process, streams = ['out', 'err']) {
-    this.logSubs.set(process, streams);
-    this.send({ type: 'log:subscribe', process, streams });
+  logSubscribe(process, streams = ['out', 'err'], agentId) {
+    const key = agentId ? `${agentId}/${process}` : process;
+    const sub = { process, streams, agentId };
+    this.logSubs.set(key, sub);
+    this.sendLogSubscribe(sub);
   }
 
-  logUnsubscribe(process) {
-    this.logSubs.delete(process);
-    this.send({ type: 'log:unsubscribe', process });
+  logUnsubscribe(process, agentId) {
+    const key = agentId ? `${agentId}/${process}` : process;
+    this.logSubs.delete(key);
+    const frame = { type: 'log:unsubscribe', process };
+    if (agentId) frame.agentId = agentId;
+    this.send(frame);
   }
 
   ping() {

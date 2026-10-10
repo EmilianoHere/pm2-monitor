@@ -1,0 +1,7 @@
+{
+  "task_id": "task-multi-instance",
+  "task_description": "Add a hub-and-spoke (pm2.io style) multi-instance capability to pm2-monitor via a single MODE config value (standalone|agent|server, default standalone). Standalone stays byte-for-byte behaviorally unchanged. Introduces a single-sourced zod-validated protocol, an agent runtime (outbound wss client reusing the local pm2 layer), a server runtime (inbound agent WS endpoint, per-agent FleetRegistry, persisted cosmetic alias store, command router with correlation, log relay, agent-aware alert engine with global maintenance, unified REST /api/agents), dashboard fleet overview + drill-down, config/redaction/docs. Keeps all ~164 existing tests green and adds new tests per design section 9.",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-005"],
+  "blocked_reason": null
+}

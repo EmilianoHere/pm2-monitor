@@ -25,6 +25,27 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
 
+        // --- Run mode ---------------------------------------------------
+        // standalone (default) | agent | server. See README "Run modes".
+        // MODE: 'standalone',
+        //
+        // Agent mode (dials a server, opens NO inbound port):
+        //   MODE: 'agent',
+        //   SERVER_URL: 'wss://monitor.example.com',        // base host; AGENT_WS_PATH is appended
+        //   AGENT_TOKEN: 'set-in-dotenv',                   // credential this agent presents
+        //   AGENT_NAME: 'checkout-prod',                    // alias hint (visual only)
+        //   AGENT_ID_FILE: 'config/agent-id',               // persisted id suffix (gitignored)
+        //   AGENT_WS_PATH: '/agent',                        // must match the server
+        //   TLS_INSECURE: 'false',                          // true disables cert verify (unsafe)
+        //
+        // Server mode (accepts agents, serves the fleet dashboard):
+        //   MODE: 'server',
+        //   AGENT_TOKENS: 'set-in-dotenv',                  // comma-separated valid tokens
+        //   ALIAS_STORE_FILE: 'config/agent-aliases.json',  // persisted aliases (gitignored)
+        //   AGENT_WS_PATH: '/agent',                         // agent-facing WS path (NOT /ws)
+        //   TLS_CERT_FILE: '',                               // native TLS cert (pair with key)
+        //   TLS_KEY_FILE: '',                                // native TLS key (pair with cert)
+
         // HTTP + WebSocket server
         PORT: 3000,
         HOST: '127.0.0.1',

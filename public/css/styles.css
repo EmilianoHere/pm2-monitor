@@ -519,3 +519,18 @@ select {
 .toast--info {
   border-left-color: var(--accent);
 }
+
+/* --- Fleet overview (server mode) --- */
+.agent-alias-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: 14px;
+  max-width: 160px;
+}
+.agent-alias-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}

@@ -51,11 +51,14 @@ export class OverviewView {
    * @param {(opts:object)=>Promise<boolean>} opts.confirm  resolves true on confirm
    * @param {(msg:string, kind?:string)=>void} opts.toast
    */
-  constructor({ root, onOpenDetail, confirm, toast }) {
+  constructor({ root, onOpenDetail, confirm, toast, agentId }) {
     this.root = root;
     this.onOpenDetail = onOpenDetail;
     this.confirm = confirm;
     this.toast = toast;
+    // Optional agent scope (server mode). Undefined in standalone, so control
+    // and detail calls use the existing /api/processes paths unchanged.
+    this.agentId = agentId;
     this.processes = [];
   }
 
@@ -148,9 +151,9 @@ export class OverviewView {
     btn.disabled = true;
     try {
       if (action === 'delete') {
-        await api.deleteProcess(name);
+        await api.deleteProcess(name, this.agentId);
       } else {
-        await api.control(name, action);
+        await api.control(name, action, this.agentId);
       }
       this.toast(`${action} issued for ${name}`, 'success');
     } catch (err) {

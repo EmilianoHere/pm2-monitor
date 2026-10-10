@@ -15,11 +15,14 @@ function fmtTime(ts) {
 }
 
 export class DetailView {
-  constructor({ root, ws, toast, onBack }) {
+  constructor({ root, ws, toast, onBack, agentId }) {
     this.root = root;
     this.ws = ws;
     this.toast = toast;
     this.onBack = onBack;
+    // Optional agent scope (server mode). Undefined in standalone, so every API
+    // call below hits the existing /api/processes paths unchanged.
+    this.agentId = agentId;
     this.name = null;
     this.chart = null;
     this.logs = null;
@@ -28,7 +31,12 @@ export class DetailView {
   async mount(name) {
     this.name = name;
     this.renderShell();
-    this.logs = new LogsView({ root: this.root.querySelector('#detail-logs'), ws: this.ws, toast: this.toast });
+    this.logs = new LogsView({
+      root: this.root.querySelector('#detail-logs'),
+      ws: this.ws,
+      toast: this.toast,
+      agentId: this.agentId,
+    });
     await Promise.all([this.loadMeta(), this.loadMetrics(), this.loadErrors()]);
     await this.logs.mount(name);
   }
@@ -65,10 +73,24 @@ export class DetailView {
     this.root.querySelector('#detail-back').addEventListener('click', () => this.onBack());
   }
 
+  /**
+   * Loads the single-process snapshot. Standalone uses GET /api/processes/:name.
+   * The agent-scoped surface has no single-process read, so in server mode we
+   * pull the agent's process list and pick the one by name (the server returns
+   * the SAME ProcessSnapshot shape).
+   */
+  async fetchProcess() {
+    if (!this.agentId) return api.getProcess(this.name);
+    const procs = await api.agentProcesses(this.agentId);
+    const match = (procs || []).find((p) => p.name === this.name);
+    if (!match) throw new Error(`process "${this.name}" not found on agent`);
+    return match;
+  }
+
   async loadMeta() {
     const el = this.root.querySelector('#detail-meta');
     try {
-      const p = await api.getProcess(this.name);
+      const p = await this.fetchProcess();
       el.innerHTML = `<h3>Metadata</h3>
         <table class="meta-table">
           <tr><td>Status</td><td><span class="status status--${p.status}">${p.status}</span></td></tr>
@@ -92,7 +114,9 @@ export class DetailView {
     const fallback = this.root.querySelector('#metrics-fallback');
     let samples = [];
     try {
-      const res = await api.metrics(this.name, ONE_HOUR_MS);
+      const res = this.agentId
+        ? await api.agentMetrics(this.agentId, this.name, ONE_HOUR_MS)
+        : await api.metrics(this.name, ONE_HOUR_MS);
       samples = res.samples || [];
     } catch (err) {
       fallback.innerHTML = `<p class="metric__label">Could not load metrics: ${err.message}</p>`;
@@ -164,7 +188,7 @@ export class DetailView {
   async loadErrors() {
     const el = this.root.querySelector('#detail-errors');
     try {
-      const errors = await api.errors({ name: this.name, limit: 50 });
+      const errors = await api.errors({ name: this.name, limit: 50 }, this.agentId);
       if (!errors.length) {
         el.innerHTML = '<p class="metric__label">No errors tracked.</p>';
         return;

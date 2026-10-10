@@ -1,0 +1,54 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "title": "configSchema is a ZodEffects (ends in .superRefine); 'add fields to configSchema' is not mechanically possible as written",
+      "location": "design.md \u00a71 'New variables added to configSchema' and 'Cross-field superRefine guards'",
+      "problem": "src/config/env.ts exports configSchema as z.object({...}).superRefine(...), i.e. a ZodEffects, not a ZodObject. New fields must go inside the .object({...}) literal before .superRefine, and new cross-field guards inside the body of the single existing superRefine callback. The design's loose 'added alongside' phrasing invites configSchema.extend(...) or a second chained .superRefine, neither of which works correctly on a ZodEffects.",
+      "fix": "State explicitly: new fields are inserted into the existing z.object({...}) literal before the trailing .superRefine; new MODE cross-field guards are added as ctx.addIssue blocks inside the existing single superRefine callback after the auth/email guards; AppConfig stays z.infer<typeof configSchema>; no .extend() and no second .superRefine()."
+    },
+    {
+      "id": 2,
+      "severity": "MEDIUM",
+      "title": "Agent-mode boot order for createPm2Adapter is unspecified; the standalone 'bind-then-wire-PM2-in-background' guarantee does not carry over and AC-14 can be violated",
+      "location": "design.md \u00a73 'constructed exactly as in standalone'; \u00a78 item 8 (src/boot/agent.ts)",
+      "problem": "createPm2Adapter (src/pm2/client.ts) neutralizes inherited IPC and gates connect on a local pingDaemon, attaching only to an already-running daemon. In standalone, index.ts builds it in a background task AFTER server.listen so a hung/absent daemon never blocks boot. The agent binds no HTTP server, so that anchor is gone; the design never says the agent preserves the same 'never block the outbound WS dial on local PM2 connect' deferral, nor how a control:request arriving before PM2 attaches is answered. A synchronous adapter build before dialing can violate AC-14 (keep the server connection while local PM2 is down).",
+      "fix": "Specify bootstrapAgent() starts the AgentConnection dial loop first/concurrently and wires createPm2Adapter/Pm2Client.start() in a background task exactly as index.ts, using the same PM2_UNAVAILABLE/[] facade until the real client is wired, so a control:request before PM2 attaches returns a correlated PM2_UNAVAILABLE ControlResult and the dial is never blocked by local PM2."
+    },
+    {
+      "id": 3,
+      "severity": "NIT",
+      "title": "logger.ts docstring ('shallow + one level nested') is stale vs. the full-depth recursion the design now relies on",
+      "location": "design.md \u00a77 'Redaction depth'",
+      "problem": "The design's corrected depth analysis is accurate against the code, but the logger.ts module docstring still says '(shallow + one level nested)', contradicting the real behavior the design depends on. An implementer reading the stale doc may weaken the redaction test to match it.",
+      "fix": "Add a line to \u00a77 noting the logger.ts docstring is stale (implementation recurses to full depth), that the \u00a79 redaction-depth test is the source of truth, and to update the docstring while adding the keys."
+    },
+    {
+      "id": 4,
+      "severity": "NIT",
+      "title": "Agent start-new sanitization uses ALLOWED_SCRIPT_ROOT but \u00a71 never lists/threads it for agent mode",
+      "location": "design.md \u00a73 'Inbound command execution'; \u00a71 agent-only vars",
+      "problem": "ALLOWED_SCRIPT_ROOT already exists (all modes) but the agent config list omits it and the design never states the agent threads config.ALLOWED_SCRIPT_ROOT into buildSchemas, leaving it ambiguous whether an operator can confine remote start-new per agent host.",
+      "fix": "Add a one-line wiring note: the agent builds RequestSchemas via buildSchemas({ allowedScriptRoot: config.ALLOWED_SCRIPT_ROOT }), reusing the existing variable so remote start-new can be confined per host as in standalone."
+    },
+    {
+      "id": 5,
+      "severity": "NIT",
+      "title": "Routed-create HTTP status: 201 must apply only to the ok branch; not-ok create must use statusForControlCode",
+      "location": "design.md \u00a74 'HTTP status mapping'; \u00a75 REST table (POST /api/agents/:id/processes)",
+      "problem": "Standalone create returns 201 on success (sendControlResult(res,result,201)). statusForControlCode maps only failures; success is described as '200 (or 201 for create)'. A routed create can also fail (VALIDATION->400, AGENT_OFFLINE->409). The design should pin that 201 applies only when result.ok, else statusForControlCode governs, so an implementer does not hardcode 201 for the create route regardless of ok-ness.",
+      "fix": "Pin in \u00a74: agents create route returns 201 only when result.ok===true; a not-ok create result uses statusForControlCode(result.code) with the error envelope, identical to other control endpoints; non-create control returns 200 on ok."
+    },
+    {
+      "id": 6,
+      "severity": "NIT",
+      "title": "register:nack and handshake-timeout close paths are not stated to share the idempotent onLinkDead guard",
+      "location": "design.md \u00a73 'Connection + reconnect' and 'Heartbeat and single-path liveness'",
+      "problem": "The two liveness paths funnel through an idempotent onLinkDead(), but register:nack's 'close + schedule reconnect' and the transport close from the server's 5s handshake timeout are additional teardown triggers whose relationship to onLinkDead() is unstated. If separate, a single event could schedule two reconnects \u2014 the exact double-trigger onLinkDead was designed to prevent.",
+      "fix": "State that all socket-teardown paths (register:nack, handshake-timeout/transport close, heartbeat/pong dead-link) funnel through the single idempotent onLinkDead() so exactly one reconnect is scheduled; register:nack additionally logs the nack code before calling it."
+    }
+  ],
+  "reviewDoc": "/Users/puser/repos/phinx/Arbitrage/emi/pm2-monitor/.worktrees/multi-instance/.agents/tasks/multi-instance/design-review.md"
+}

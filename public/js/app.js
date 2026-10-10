@@ -1,11 +1,19 @@
 // Bootstrap: read/prompt for auth into sessionStorage, open the WebSocket, route
 // between the overview and detail views, render the PM2-unreachable banner from
 // the WS `pm2` message, and drive the maintenance toggle via POST /api/maintenance.
+//
+// Mode discovery: GET /api/system/health carries a `mode` field. In standalone
+// the dashboard behaves exactly as before — no agent concepts, the local process
+// snapshot drives the overview, and every path below is byte-identical to today.
+// In server mode the dashboard first shows a fleet overview (agent cards); the
+// per-agent overview/detail reuse the SAME components parameterized by an agentId
+// so only the REST/WS base path changes.
 
 import { api, getAuth, setAuth, clearAuth } from './api.js';
 import { WsClient } from './ws.js';
 import { OverviewView } from './views/overview.js';
 import { DetailView } from './views/detail.js';
+import { AgentsView } from './views/agents.js';
 
 // --- DOM refs ---
 const els = {
@@ -17,12 +25,19 @@ const els = {
   nav: document.getElementById('nav'),
   overview: document.getElementById('view-overview'),
   detail: document.getElementById('view-detail'),
+  fleet: document.getElementById('view-fleet'),
   confirmModal: document.getElementById('confirm-modal'),
   confirmTitle: document.getElementById('confirm-title'),
   confirmBody: document.getElementById('confirm-body'),
   confirmOk: document.getElementById('confirm-ok'),
   toasts: document.getElementById('toasts'),
 };
+
+// Discovered from GET /api/system/health. 'standalone' until proven otherwise so
+// the standalone path never waits on the probe.
+let mode = 'standalone';
+// Server mode: the agent currently drilled into (null = showing the fleet).
+let activeAgentId = null;
 
 // --- toasts ---
 function toast(message, kind = 'info') {
@@ -59,9 +74,9 @@ function confirmDialog({ title, body, confirmLabel = 'Confirm' }) {
 // --- auth prompt ---
 function ensureAuth() {
   if (getAuth()) return true;
-  const mode =
+  const authMode =
     (window.prompt('Auth mode: type "apikey" or "basic"', 'apikey') || '').trim().toLowerCase();
-  if (mode === 'basic') {
+  if (authMode === 'basic') {
     const user = window.prompt('Username:') || '';
     const pass = window.prompt('Password:') || '';
     if (!user) return false;
@@ -77,19 +92,24 @@ function ensureAuth() {
 // --- views + router ---
 const ws = new WsClient();
 
-const overview = new OverviewView({
+// Standalone views (constructed once, no agent scope). In server mode these are
+// rebuilt per selected agent (see mountAgentOverview / mountAgentDetail).
+let overview = new OverviewView({
   root: els.overview,
   onOpenDetail: (name) => route('detail', name),
   confirm: confirmDialog,
   toast,
 });
 
-const detail = new DetailView({
+let detail = new DetailView({
   root: els.detail,
   ws,
   toast,
   onBack: () => route('overview'),
 });
+
+// Server-mode fleet overview (lazily constructed when mode === 'server').
+let fleet = null;
 
 let currentRoute = 'overview';
 
@@ -98,14 +118,58 @@ function route(view, name) {
   if (currentRoute === 'detail' && view !== 'detail') detail.unmount();
 
   currentRoute = view;
+  els.overview.hidden = view !== 'overview';
+  els.detail.hidden = view !== 'detail';
+  if (els.fleet) els.fleet.hidden = view !== 'fleet';
+
   if (view === 'detail') {
-    els.overview.hidden = true;
-    els.detail.hidden = false;
     detail.mount(name).catch((err) => toast(`detail failed: ${err.message}`, 'error'));
+  } else if (view === 'fleet') {
+    if (fleet) fleet.refresh();
   } else {
-    els.detail.hidden = true;
-    els.overview.hidden = false;
+    // overview (same component in both modes; the per-agent variant is bound to
+    // an agentId by openAgent)
     overview.render();
+  }
+}
+
+// --- server-mode fleet wiring ---
+function buildNav() {
+  // Server mode adds a "Fleet" link; standalone keeps the single Overview link
+  // byte-identical.
+  if (mode !== 'server') return;
+  els.nav.innerHTML =
+    '<button type="button" class="nav__link" data-route="fleet">Fleet</button>';
+}
+
+function openAgent(agentId) {
+  activeAgentId = agentId;
+  // Rebuild the overview/detail bound to this agent; the per-agent process grid,
+  // control buttons, metrics, and log tail reuse the SAME components.
+  overview = new OverviewView({
+    root: els.overview,
+    onOpenDetail: (name) => route('detail', name),
+    confirm: confirmDialog,
+    toast,
+    agentId,
+  });
+  detail = new DetailView({
+    root: els.detail,
+    ws,
+    toast,
+    onBack: () => route('overview'),
+    agentId,
+  });
+  loadAgentOverview(agentId);
+}
+
+async function loadAgentOverview(agentId) {
+  route('overview');
+  try {
+    const procs = await api.agentProcesses(agentId);
+    overview.setProcesses(procs || []);
+  } catch (err) {
+    toast(`agent load failed: ${err.message}`, 'error');
   }
 }
 
@@ -138,14 +202,23 @@ function wireWs() {
   ws.on('alert', (msg) => {
     const p = msg.payload || {};
     const prefix = msg.delivered ? 'Alert' : 'Alert (suppressed)';
-    toast(`${prefix}: ${p.title || p.ruleId || 'rule fired'} — ${p.processName || ''}`, 'info');
+    const who = p.agentAlias || p.agentId;
+    const scope = who ? `[${who}] ` : '';
+    toast(
+      `${prefix}: ${scope}${p.title || p.ruleId || 'rule fired'} — ${p.processName || ''}`,
+      'info',
+    );
   });
 
   ws.connect();
 }
 
 function applySnapshot(snapshot) {
+  // The local-state snapshot only drives the standalone overview. In server mode
+  // there is no single local snapshot (the per-agent grids load via REST), so WS
+  // state frames are ignored for the process grid.
   if (!snapshot) return;
+  if (mode === 'server') return;
   setPm2Connected(snapshot.pm2Connected);
   // Keep the maintenance toggle in sync without clobbering an in-flight change.
   if (document.activeElement !== els.maintToggle) {
@@ -190,8 +263,28 @@ async function boot() {
     return;
   }
 
+  // Discover the run mode (unauthenticated). Default stays 'standalone' on error
+  // so a probe failure never changes the standalone experience.
+  try {
+    const health = await api.health();
+    if (health && health.mode === 'server') mode = 'server';
+  } catch {
+    /* non-fatal — assume standalone */
+  }
+
   wireWs();
 
+  if (mode === 'server') {
+    await bootServer();
+  } else {
+    await bootStandalone();
+  }
+
+  // Keep the WS warm.
+  setInterval(() => ws.ping(), 30000);
+}
+
+async function bootStandalone() {
   // Initial REST load so the grid fills even before the first WS frame, and to
   // surface a 401 early if the credential is wrong.
   try {
@@ -213,9 +306,31 @@ async function boot() {
   } catch {
     /* non-fatal */
   }
+}
 
-  // Keep the WS warm.
-  setInterval(() => ws.ping(), 30000);
+async function bootServer() {
+  // The server has no local PM2 daemon, so hide the PM2-unreachable banner (its
+  // per-agent equivalent is the pm2-connected badge on each agent card).
+  setPm2Connected(true);
+
+  buildNav();
+  fleet = new AgentsView({
+    root: els.fleet,
+    onOpenAgent: (id) => openAgent(id),
+    toast,
+  });
+  route('fleet');
+
+  // Reflect the global maintenance state (401 surfaces here too).
+  try {
+    const m = await api.getMaintenance();
+    els.maintToggle.checked = Boolean(m.active);
+  } catch (err) {
+    if (err.status === 401) {
+      clearAuth();
+      toast('Invalid credentials — reload to re-enter.', 'error');
+    }
+  }
 }
 
 boot();

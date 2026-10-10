@@ -17,6 +17,8 @@
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Logger } from '../core/logger.js';
 import { redactUrl } from '../core/logger.js';
@@ -51,6 +53,11 @@ import type { ControlAction, ControlResult, StartNewOpts } from '../pm2/client.j
 import type { MonitorSnapshot } from '../core/types.js';
 
 const MONITOR_VERSION = '1.0.0';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// public/ lives at the project root. From dist/boot/server.js (or
+// src/boot/server.ts), '../..' is the project root — same as standalone.
+const PUBLIC_DIR = path.resolve(__dirname, '..', '..', 'public');
 
 interface ApiErrorLike {
   statusCode?: number;
@@ -286,6 +293,11 @@ export function buildServerApp(deps: ServerAppDeps): express.Express {
   // Unified fleet surface.
   app.use('/api/agents', createAgentsRouter({ fleet: buildFleetDeps(deps.registry, deps.aliases), schemas: deps.schemas, now: () => Date.now() }));
 
+  // Static dashboard shell (unauthenticated), identical to standalone — the same
+  // public/ assets serve the fleet UI, which discovers server mode from health.
+  app.use('/', express.static(PUBLIC_DIR));
+
+  // 404 for unmatched /api routes (static handles the rest).
   app.use('/api', (_req: Request, res: Response) => {
     res.status(404).json({ error: { code: 'NOT_FOUND', message: 'unknown endpoint' } });
   });

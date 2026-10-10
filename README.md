@@ -73,10 +73,139 @@ only from env and are never logged. Every variable is documented in
 | `DIGEST_ENABLED` | boolean | `false` | no | Daily digest toggle |
 | `DIGEST_HOUR` | number (0-23) | `8` | no | Local hour to send the digest |
 | `LOG_LEVEL` | `debug`\|`info`\|`warn`\|`error` | `info` | no | Log verbosity |
+| `MODE` | `standalone`\|`agent`\|`server` | `standalone` | no | Run mode (see [Run modes](#run-modes)) |
+| `SERVER_URL` | url (`ws(s)://`) | — | if `agent` | Server base URL (host only; `AGENT_WS_PATH` is appended) |
+| `AGENT_TOKEN` | string | — | if `agent` | Token this agent presents (redacted) |
+| `AGENT_NAME` | string | — | no | Alias hint seeded on first connect (visual only) |
+| `AGENT_ID_FILE` | string | `config/agent-id` | no | Persisted agent-id suffix (gitignored) |
+| `AGENT_WS_PATH` | string | `/agent` | no | Agent WS path; must match on both ends; must not be `/ws` |
+| `TLS_INSECURE` | boolean | `false` | no | **Agent:** skip server cert verification (unsafe) |
+| `AGENT_TOKENS` | string | — | if `server` | Comma-separated valid agent tokens (redacted) |
+| `ALIAS_STORE_FILE` | string | `config/agent-aliases.json` | no | Persisted alias map (gitignored) |
+| `TLS_CERT_FILE` | string | — | no | **Server:** native TLS cert (pair with key) |
+| `TLS_KEY_FILE` | string | — | no | **Server:** native TLS key (pair with cert) |
 
 A channel is "enabled" when its full group of required vars is present. A
 Teams-only or email-only deployment is valid; an absent channel is disabled with
 a one-time startup log rather than an error.
+
+## Run modes
+
+The `MODE` variable selects one of three mutually exclusive runtimes. It defaults
+to `standalone`, so an existing deployment with no `MODE` set behaves exactly as
+before — the multi-instance machinery is entirely additive and off by default.
+
+- **`standalone`** (default) — the classic single-process monitor: it attaches to
+  the LOCAL PM2 daemon, serves the dashboard and REST/WS API, and alerts. This is
+  everything documented above and is unchanged.
+- **`agent`** — monitors and controls the LOCAL PM2 daemon exactly like
+  standalone, but instead of serving its own dashboard it dials a **server** over
+  an outbound WebSocket and streams its process state, metrics, errors, and logs
+  there. An agent opens **no inbound port** and serves **no HTTP** of its own. It
+  keeps monitoring local PM2 and keeps retrying the server connection
+  independently, so a down server never stops local monitoring and a down local
+  PM2 never drops the server link.
+- **`server`** — the hub. It accepts agent connections on a dedicated WS path,
+  keeps a per-agent view of every fleet process, runs the alert engine across all
+  agents, and serves the **fleet dashboard** (overview of all agents, drill-down
+  into each agent's processes/metrics/logs). A server has **no local PM2 daemon**
+  of its own; its health reports an `agents` summary instead of `pm2Connected`.
+
+### Example per mode
+
+Standalone (`.env`):
+
+```ini
+# MODE unset (or MODE=standalone)
+AUTH_MODE=apikey
+API_KEY=change-me-to-a-long-random-string
+```
+
+Agent (`.env` on each monitored host):
+
+```ini
+MODE=agent
+SERVER_URL=wss://monitor.example.com   # base host only; AGENT_WS_PATH (/agent) is appended
+AGENT_TOKEN=the-shared-agent-token
+AGENT_NAME=checkout-prod               # optional alias hint (visual only)
+# TLS_INSECURE=false                   # keep false in production
+```
+
+Server (`.env` on the hub):
+
+```ini
+MODE=server
+AUTH_MODE=apikey
+API_KEY=change-me-to-a-long-random-string   # human dashboard auth (unchanged)
+AGENT_TOKENS=token-a,token-b                # valid agent tokens (separate credential space)
+# TLS terminated at a reverse proxy by default; set the pair below for native TLS:
+# TLS_CERT_FILE=/etc/ssl/monitor/fullchain.pem
+# TLS_KEY_FILE=/etc/ssl/monitor/privkey.pem
+```
+
+### Agent identity and aliases
+
+Each agent derives a **stable id** of the form `<hostname>-<suffix>`, where the
+random suffix is generated once and persisted to `AGENT_ID_FILE` (default
+`config/agent-id`, gitignored) so the id is stable across restarts. `AGENT_NAME`
+(if set) seeds a human-friendly **alias** the first time the agent connects.
+
+The alias is **purely cosmetic** (how you see the agent in the dashboard) and is
+independent of the id. An operator can rename an agent inline from the fleet
+overview (`PUT /api/agents/:id/alias`); the operator-set alias always wins over
+the `AGENT_NAME` hint, and the real id is always shown on hover and in the edit
+field so agents remain unambiguous. Aliases are persisted on the server in
+`ALIAS_STORE_FILE` (default `config/agent-aliases.json`, gitignored) and survive
+a server restart.
+
+### Agent↔server protocol
+
+Agent and server speak a small, **versioned JSON protocol** over the WebSocket. A
+`PROTOCOL_VERSION` integer is carried in the handshake; the server rejects a
+version mismatch rather than guessing. Every frame is a `type`-discriminated
+object validated by a schema that never throws on bad input (a malformed frame is
+answered with `{ type: "error", code: "BAD_MESSAGE" }` and never acted on).
+
+Message flow (A→S agent→server, S→A server→agent):
+
+- **Handshake:** `register` (A→S, carries `protocolVersion`, `agentId`, `token`,
+  and `meta` host info) → `register:ack` (S→A, with the heartbeat interval) or
+  `register:nack` (S→A, `AUTH_FAILED` / `VERSION_MISMATCH`).
+- **Liveness:** `heartbeat`/`heartbeat:ack` plus the transport ping/pong backstop.
+- **State:** `snapshot` (full process set, re-sent on connect and whenever the set
+  changes), `update:transition`, `update:metrics`, `update:error`, `update:pm2`.
+- **Control (correlated by a `cid`):** `control:request` / `control:createRequest`
+  (S→A) → `control:response` (A→S). An unmatched/duplicate/late response is
+  ignored; a request with no response within the timeout resolves as
+  `AGENT_TIMEOUT`.
+- **Logs:** `log:subscribe` / `log:unsubscribe` (S→A) → `log:line` (A→S).
+
+Control commands are validated with the SAME schemas on both ends: the server
+validates before routing, and the agent re-validates before touching PM2.
+
+### Security
+
+- **Separate credential spaces.** Agent tokens (`AGENT_TOKENS`/`AGENT_TOKEN`) and
+  human dashboard credentials (`API_KEY` / basic auth) are checked by different
+  code on different paths and never cross: a human credential cannot authenticate
+  an agent and vice-versa. Agent tokens are compared in constant time and the
+  comparison never throws on empty/malformed input.
+- **Token rotation / revocation.** `AGENT_TOKENS` is a comma-separated list, so
+  multiple tokens are valid at once. To rotate: add the new token alongside the
+  old, let every agent reconnect with the new token, then drop the old one — no
+  agent restart is required, since an agent retries indefinitely and the next
+  (capped) retry succeeds once its token is accepted. To revoke a single agent,
+  remove its token and restart the server; that agent's next connect is refused
+  with `AUTH_FAILED` and it simply keeps retrying (harmless) until re-authorized.
+- **TLS.** Agents dial `wss://` and **verify the server certificate by default**.
+  `TLS_INSECURE=true` disables verification and is for self-signed certs in
+  testing only — it is logged loudly at startup and on every reconnect, and must
+  not be used in production. The server supports **reverse-proxy TLS termination**
+  (no cert config; point agents at the proxy's `wss://`) and **native TLS** when
+  both `TLS_CERT_FILE` and `TLS_KEY_FILE` are set; setting only one is a config
+  error that fails fast at boot.
+- **Redaction.** `AGENT_TOKEN`, `AGENT_TOKENS`, and `SERVER_URL` (and any
+  `?token=` in a URL) are redacted from all logs.
 
 ## Running
 
@@ -144,7 +273,7 @@ Content-Type is `application/json`.
 
 | Method | Path | Auth | Destructive | Request | Success response |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/api/system/health` | no | no | — | `{ status, pm2Connected, maintenance, uptimeMs, version }` |
+| GET | `/api/system/health` | no | no | — | standalone: `{ status, mode:'standalone', pm2Connected, maintenance, uptimeMs, version }`; server: `{ status, mode:'server', maintenance, agents:{total,online}, uptimeMs, version }` (no `pm2Connected`) |
 | GET | `/api/system/status` | yes | no | — | `MonitorSnapshot` |
 | GET | `/api/processes` | yes | no | — | `ProcessSnapshot[]` |
 | GET | `/api/processes/:name` | yes | no | — | `ProcessSnapshot` or 404 |
@@ -178,6 +307,45 @@ curl -X POST -H "X-API-Key: $API_KEY" \
   http://127.0.0.1:3000/api/processes/api/restart
 ```
 
+### Fleet API (server mode only)
+
+In **server** mode the per-process routes above are not mounted (there is no
+single local PM2); the fleet is addressed under `/api/agents` instead, behind the
+**same human auth**. Each per-agent route returns the SAME shapes as its
+standalone `/api/processes/...` counterpart, so the dashboard reuses the same
+views with only the base path changed. `GET /api/system/status` is not mounted in
+server mode; use `GET /api/agents` + `GET /api/agents/:id`.
+
+| Method | Path | Destructive | Request | Success response |
+| --- | --- | --- | --- | --- |
+| GET | `/api/agents` | no | — | `[{ id, alias, online, meta, pm2Connected, processCount, lastSeen }]` (live registry; a pre-seeded alias for a never-connected id is not listed) |
+| GET | `/api/agents/:id` | no | — | `{ id, alias, online, meta, pm2Connected, processes }` or 404 `AGENT_NOT_FOUND` |
+| GET | `/api/agents/:id/processes` | no | — | `ProcessSnapshot[]` |
+| GET | `/api/agents/:id/processes/:name/metrics` | no | `?sinceMs` (default 1h) | `{ name, samples: MetricSample[] }` |
+| GET | `/api/agents/:id/processes/:name/logs` | no | `?lines`, `?stream`, `?q`, `?level` | `{ name, lines }` — recent live-relayed lines (see note) |
+| GET | `/api/agents/:id/errors` | no | `?name` | `TrackedError[]` |
+| POST | `/api/agents/:id/processes/:name/start` | **yes** | — | `ControlResult` |
+| POST | `/api/agents/:id/processes/:name/stop` | **yes** | — | `ControlResult` |
+| POST | `/api/agents/:id/processes/:name/restart` | **yes** | — | `ControlResult` |
+| POST | `/api/agents/:id/processes/:name/reload` | **yes** | — | `ControlResult` |
+| DELETE | `/api/agents/:id/processes/:name` | **yes** | — | `ControlResult` |
+| POST | `/api/agents/:id/processes` | **yes** | `{ script?, ecosystem?, name?, instances?, exec_mode? }` | `ControlResult` (201 only on ok) |
+| PUT | `/api/agents/:id/alias` | no | `{ alias }` | `{ id, alias }` or 400 `VALIDATION` |
+
+Routed-control status codes add two fleet-specific mappings on top of the
+standalone set: `409` for `AGENT_OFFLINE`/`AGENT_TIMEOUT` (the agent is not
+reachable or did not answer in time) and `404` for `AGENT_NOT_FOUND`.
+
+**Server-mode logs are live-relayed, not a historical file tail.** Unlike
+standalone's `/logs`, which reads a real file tail from the local PM2, the
+server-mode `GET /api/agents/:id/processes/:name/logs` returns a bounded ring of
+the **last ~200 lines that were live-relayed while a WS log subscription was
+active**. With nothing actively streaming for that process the ring is empty and
+the endpoint returns `{ name, lines: [] }` — a well-defined empty result, not an
+error. The primary server-mode log experience is the **live WS relay** (open the
+agent's log view in the dashboard); the REST tail is a convenience snapshot of
+what is currently streaming.
+
 ## WebSocket protocol
 
 Single endpoint `GET /ws` on the same host/port, authenticated at the upgrade.
@@ -194,6 +362,12 @@ Client → server frames:
 { "type": "log:unsubscribe", "process": "api" }
 { "type": "ping" }
 ```
+
+In **server** mode `log:subscribe`/`log:unsubscribe` accept an optional
+`agentId` (`{ "type": "log:subscribe", "agentId": "web-1a2b", "process": "api",
+"streams": ["out","err"] }`) that selects which agent's logs to relay. The
+relayed `log` frame then also carries `agentId`. With no `agentId` the frame is
+byte-identical to standalone and uses the local log fan-out unchanged.
 
 Server → client frames:
 
@@ -227,6 +401,13 @@ Served statically at `/` (no bundler). It renders:
   list, and a live log viewer with client-side search and an info/error toggle.
 - A top bar with global WebSocket connectivity, a PM2-unreachable banner, and a
   maintenance-mode toggle.
+
+In **server** mode the dashboard discovers `mode` from `GET /api/system/health`
+and adds a **Fleet** view: a grid of agent cards (alias-or-id, online badge,
+host/platform, process count, pm2-connected badge) with inline alias editing.
+Selecting an agent drills into the SAME overview/detail components, now scoped to
+that agent. In **standalone** mode the dashboard is byte-for-byte identical to
+before — no agent concepts appear.
 
 ## Alert rules
 

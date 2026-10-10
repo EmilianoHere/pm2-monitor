@@ -94,29 +94,71 @@ async function request(method, path, { query, body } = {}) {
   return data;
 }
 
+/**
+ * Base path for per-process reads/control. In standalone (no `agentId`) this is
+ * the existing `/api/processes` surface — the call sites below pass no `agentId`
+ * so the standalone requests are byte-identical. In server mode an `agentId`
+ * selects the agent-scoped `/api/agents/:id/processes` surface, which returns
+ * the SAME shapes so the overview/detail components are reused unchanged.
+ */
+function processBase(agentId) {
+  return agentId ? `/api/agents/${encodeURIComponent(agentId)}/processes` : '/api/processes';
+}
+
 export const api = {
   // --- system ---
   health: () => request('GET', '/api/system/health'),
   status: () => request('GET', '/api/system/status'),
 
-  // --- processes ---
-  listProcesses: () => request('GET', '/api/processes'),
-  getProcess: (name) => request('GET', `/api/processes/${encodeURIComponent(name)}`),
-  metrics: (name, sinceMs) =>
-    request('GET', `/api/processes/${encodeURIComponent(name)}/metrics`, { query: { sinceMs } }),
-  logs: (name, { lines, stream, q, level } = {}) =>
-    request('GET', `/api/processes/${encodeURIComponent(name)}/logs`, {
+  // --- processes (optional agentId selects the agent-scoped base path) ---
+  listProcesses: (agentId) =>
+    agentId
+      ? request('GET', `/api/agents/${encodeURIComponent(agentId)}/processes`)
+      : request('GET', '/api/processes'),
+  getProcess: (name, agentId) =>
+    request('GET', `${processBase(agentId)}/${encodeURIComponent(name)}`),
+  metrics: (name, sinceMs, agentId) =>
+    request('GET', `${processBase(agentId)}/${encodeURIComponent(name)}/metrics`, {
+      query: { sinceMs },
+    }),
+  logs: (name, { lines, stream, q, level } = {}, agentId) =>
+    request('GET', `${processBase(agentId)}/${encodeURIComponent(name)}/logs`, {
       query: { lines, stream, q, level },
     }),
 
-  // --- control (destructive) ---
-  control: (name, action) =>
-    request('POST', `/api/processes/${encodeURIComponent(name)}/${action}`),
-  deleteProcess: (name) => request('DELETE', `/api/processes/${encodeURIComponent(name)}`),
+  // --- control (destructive; optional agentId selects the agent-scoped path) ---
+  control: (name, action, agentId) =>
+    request('POST', `${processBase(agentId)}/${encodeURIComponent(name)}/${action}`),
+  deleteProcess: (name, agentId) =>
+    agentId
+      ? // Agent-scoped delete is a POST action (routed control), not a DELETE verb.
+        request('POST', `${processBase(agentId)}/${encodeURIComponent(name)}/delete`)
+      : request('DELETE', `/api/processes/${encodeURIComponent(name)}`),
 
-  // --- errors ---
-  errors: ({ name, sinceMs, limit } = {}) =>
-    request('GET', '/api/errors', { query: { name, sinceMs, limit } }),
+  // --- errors (optional agentId selects the agent-scoped path) ---
+  errors: ({ name, sinceMs, limit } = {}, agentId) =>
+    agentId
+      ? request('GET', `/api/agents/${encodeURIComponent(agentId)}/errors`, {
+          query: { name, sinceMs, limit },
+        })
+      : request('GET', '/api/errors', { query: { name, sinceMs, limit } }),
+
+  // --- agents (server mode only) ---
+  listAgents: () => request('GET', '/api/agents'),
+  getAgent: (id) => request('GET', `/api/agents/${encodeURIComponent(id)}`),
+  agentProcesses: (id) => request('GET', `/api/agents/${encodeURIComponent(id)}/processes`),
+  agentMetrics: (id, name, sinceMs) =>
+    request('GET', `/api/agents/${encodeURIComponent(id)}/processes/${encodeURIComponent(name)}/metrics`, {
+      query: { sinceMs },
+    }),
+  agentLogs: (id, name, { lines, stream, q, level } = {}) =>
+    request('GET', `/api/agents/${encodeURIComponent(id)}/processes/${encodeURIComponent(name)}/logs`, {
+      query: { lines, stream, q, level },
+    }),
+  agentControl: (id, name, action) =>
+    request('POST', `/api/agents/${encodeURIComponent(id)}/processes/${encodeURIComponent(name)}/${action}`),
+  setAlias: (id, alias) =>
+    request('PUT', `/api/agents/${encodeURIComponent(id)}/alias`, { body: { alias } }),
 
   // --- alerts / maintenance ---
   rules: () => request('GET', '/api/alerts/rules'),
