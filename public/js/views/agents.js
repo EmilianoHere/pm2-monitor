@@ -562,8 +562,9 @@ export class AgentsView {
     return `
       <div class="connect-modal">
         <p class="connect-modal__intro">
-          Generá un token de agente y copiá el comando para conectar el servidor
-          (<code>MODE=agent</code>). El token se muestra una sola vez.
+          Generá un token de agente y copiá los comandos para dejar el servidor
+          conectado (<code>MODE=agent</code>): instalación en una máquina nueva y
+          la configuración con el token ya embebido. El token se muestra una sola vez.
         </p>
         <dl class="connect-modal__fields">
           <div class="connect-modal__field">
@@ -587,9 +588,12 @@ export class AgentsView {
   /**
    * Fill ONLY [data-generate-result] (so the backdrop/Escape/close controls that
    * live outside the body survive): the raw token once + a "no se vuelve a
-   * mostrar" warning, and a ready-to-paste command carrying SERVER_URL,
-   * AGENT_WS_PATH, the embedded AGENT_TOKEN, the agent .env lines and the pm2
-   * start step. Re-binds both Copy buttons after each render.
+   * mostrar" warning, and the FULL agent setup split into two copy-able
+   * sub-sections — (1) "Instalación (máquina nueva)" with the generic
+   * install+clone+build steps, and (2) "Configurar y arrancar" which writes
+   * .env.agent carrying the real SERVER_URL, AGENT_WS_PATH and the just-generated
+   * AGENT_TOKEN, then starts it under PM2. Re-binds the three Copy buttons after
+   * each render.
    */
   _renderGeneratedToken(result) {
     const modal = document.getElementById('connect-modal');
@@ -601,17 +605,33 @@ export class AgentsView {
     const wsPath = this._agentWsPath();
     const rawToken = result.rawToken;
 
-    // The ready-to-paste agent config: an .env block (placeholder API_KEY, since
-    // the agent needs its own human-auth key) plus the pm2 start command.
-    const command = [
-      '# .env del agente',
+    // (1) Fresh-host install: install Node 20 + git + pm2, clone, build. Static
+    // steps — no interpolated secrets. Clone uses the public HTTPS GitHub URL.
+    const installCommand = [
+      'curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -',
+      'sudo apt-get install -y nodejs git',
+      'sudo npm install -g pm2',
+      'git clone https://github.com/EmilianoHere/pm2-monitor.git',
+      'cd pm2-monitor',
+      'npm install',
+      'npm run build',
+    ].join('\n');
+
+    // (2) Configure + start: writes .env.agent with the REAL generated token +
+    // real SERVER_URL/AGENT_WS_PATH embedded (API_KEY stays a literal
+    // placeholder — it's the agent's own human-auth guard), then PM2 starts it.
+    const configCommand = [
+      "cat > ~/pm2-monitor/.env.agent <<'EOF'",
       'MODE=agent',
       `SERVER_URL=${serverUrl}`,
       `AGENT_WS_PATH=${wsPath}`,
       `AGENT_TOKEN=${rawToken}`,
-      'API_KEY=<cualquier-clave>',
-      '',
-      'pm2 start dist/index.js --name pm2-agent --cwd $(pwd)',
+      'AUTH_MODE=apikey',
+      'API_KEY=placeholder-local',
+      'EOF',
+      'cd ~/pm2-monitor',
+      "env $(grep -v '^#' .env.agent | xargs) pm2 start dist/index.js --name pm2-agent --cwd $(pwd) --update-env",
+      'pm2 save',
     ].join('\n');
 
     target.innerHTML = `
@@ -626,16 +646,24 @@ export class AgentsView {
         </p>
       </div>
       <div class="connect-modal__command-wrap">
-        <p class="connect-modal__label">Comando para configurar el agente</p>
+        <p class="connect-modal__label">1 · Instalación (máquina nueva)</p>
         <div class="connect-modal__command-row">
-          <code class="connect-modal__command" data-command>${escapeHtml(command)}</code>
-          <button type="button" class="btn btn--sm" data-copy-command>Copiar</button>
+          <code class="connect-modal__command" data-command-install>${escapeHtml(installCommand)}</code>
+          <button type="button" class="btn btn--sm" data-copy-install>Copiar</button>
+        </div>
+      </div>
+      <div class="connect-modal__command-wrap">
+        <p class="connect-modal__label">2 · Configurar y arrancar</p>
+        <div class="connect-modal__command-row">
+          <code class="connect-modal__command" data-command-config>${escapeHtml(configCommand)}</code>
+          <button type="button" class="btn btn--sm" data-copy-config>Copiar</button>
         </div>
       </div>`;
 
-    // Re-bind both Copy buttons after each render.
+    // Re-bind the three Copy buttons after each render.
     this._bindCopy(target.querySelector('[data-copy-token]'), rawToken, 'Token copiado');
-    this._bindCopy(target.querySelector('[data-copy-command]'), command, 'Comando copiado');
+    this._bindCopy(target.querySelector('[data-copy-install]'), installCommand, 'Comando de instalación copiado');
+    this._bindCopy(target.querySelector('[data-copy-config]'), configCommand, 'Comando de configuración copiado');
   }
 
   /** Wire a Copy button to write `value` to the clipboard (with a fallback). */

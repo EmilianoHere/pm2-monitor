@@ -11,6 +11,11 @@ comandos de control que el server le manda.
 > El agent abre solo una conexión **saliente** al server. No necesita puertos de
 > entrada abiertos en esta máquina.
 
+> **Atajo desde el dashboard:** en la vista Fleet, el botón **"Conectar agente"**
+> (sesión master) ahora genera el token y emite el set completo de comandos
+> —instalación en una máquina nueva y la configuración/arranque con el token ya
+> embebido—, listos para copiar. Esta guía queda como referencia manual.
+
 ## 1. Requisitos
 
 - Node.js 20+ (`node -v`).
