@@ -676,3 +676,252 @@ select {
   font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
   font-size: 13px;
 }
+
+/* ============================================================
+   PROCESOS view (FEAT-002): summary cards, attention banner,
+   filter chips, dense process table, inline bars, group headers.
+   Reuses the :root tokens and the existing .status--* dot classes.
+   ============================================================ */
+
+/* --- Summary metric cards --- */
+.summary {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--gap);
+  margin-bottom: var(--gap);
+}
+
+.metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+.metric-card__label {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.metric-card__value {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+@media (max-width: 900px) {
+  .summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* --- Attention banner --- */
+.attention-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: var(--gap);
+}
+
+.attention-banner__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.attention-banner__title {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.attention-banner__subtitle {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* --- Controls row (search + chips + grouping toggle) --- */
+.proc-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--gap);
+  margin-bottom: var(--gap);
+}
+
+.proc-search {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 14px;
+  min-width: 220px;
+}
+
+.proc-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.filter-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 14px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  color: var(--text);
+}
+
+.chip.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+  font-weight: 600;
+}
+
+.chip__count {
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+.toggle-group.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* --- Dense process table --- */
+.proc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.proc-table thead th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.proc-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.proc-row {
+  cursor: pointer;
+}
+
+.proc-row:hover {
+  background: var(--bg-elev);
+}
+
+.proc-row:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.proc-row[aria-selected="true"] {
+  background: var(--bg-elev);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.proc-row__name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.proc-row__title {
+  font-weight: 600;
+  color: var(--text);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell-num {
+  font-variant-numeric: tabular-nums;
+  display: inline-block;
+  min-width: 56px;
+}
+
+/* --- Inline CPU / memory bars --- */
+.bar {
+  display: inline-block;
+  vertical-align: middle;
+  width: 64px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.bar__fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+/* --- Highlighted restart cell when >= threshold --- */
+.cell--warn {
+  color: var(--warn-border);
+  font-weight: 700;
+}
+
+/* --- Group header rows --- */
+.proc-group__head th {
+  background: var(--bg-elev);
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.proc-group__name {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.proc-group__summary {
+  margin-left: 10px;
+  color: var(--text-dim);
+  font-weight: 400;
+  font-size: 12px;
+}
+
+/* --- Per-row icon action buttons --- */
+.proc-row__actions {
+  white-space: nowrap;
+}
+
+.btn--icon {
+  min-width: 28px;
+  padding: 4px 8px;
+}
