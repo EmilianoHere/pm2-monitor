@@ -829,7 +829,7 @@ select {
 }
 
 .proc-table td {
-  padding: 8px 10px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
@@ -854,8 +854,34 @@ select {
 
 .proc-row__name {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Bare status dot shown to the LEFT of the process name. Color encodes status
+   (green healthy / amber unstable / red stopped-errored); the full human status
+   lives in the dot's title + aria-label so color is never the only signal. */
+.proc-row__dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--status-unknown);
+}
+
+.proc-row__dot.status--online {
+  background: var(--status-online);
+}
+.proc-row__dot.status--errored {
+  background: var(--status-errored);
+}
+.proc-row__dot.status--stopped {
+  background: var(--status-stopped);
+}
+.proc-row__dot.status--launching,
+.proc-row__dot.status--stopping {
+  background: var(--status-launching);
 }
 
 .proc-row__title {

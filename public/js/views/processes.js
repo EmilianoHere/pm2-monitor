@@ -390,7 +390,8 @@ export class ProcessesView {
       <tr tabindex="0" class="proc-row" data-row="${enc}"
         aria-label="${escapeHtml(ariaLabel)}" aria-selected="${selected}">
         <td class="proc-row__name">
-          <span class="status ${dotClass}">${escapeHtml(label)}</span>
+          <span class="proc-row__dot ${dotClass}" role="img"
+            title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span>
           <span class="proc-row__title" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
         </td>
         <td>${p.pid ?? '—'}</td>
