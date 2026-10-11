@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
-import { WsHub, type FleetLogRelay, type RelayLogClient } from './hub.js';
+import { WsHub, type FleetLogRelay, type RelayLogClient, type SubscribeResult } from './hub.js';
 import { MonitorEvents } from '../core/events.js';
 import { createLogger } from '../core/logger.js';
 import type { MonitorSnapshot } from '../core/types.js';
@@ -187,11 +187,13 @@ class SpyRelay implements FleetLogRelay {
   readonly subs: Array<{ agentId: string; process: string; streams: Array<'out' | 'err'> }> = [];
   readonly unsubs: Array<{ agentId: string; process: string }> = [];
   private lastClient: RelayLogClient | null = null;
+  /** the result the next subscribeLogs call returns (default 'subscribed'). */
+  nextResult: SubscribeResult = 'subscribed';
 
-  subscribeLogs(agentId: string, process: string, streams: Array<'out' | 'err'>, client: RelayLogClient): boolean {
+  subscribeLogs(agentId: string, process: string, streams: Array<'out' | 'err'>, client: RelayLogClient): SubscribeResult {
     this.subs.push({ agentId, process, streams });
     this.lastClient = client;
-    return true;
+    return this.nextResult;
   }
   unsubscribeLogs(agentId: string, process: string): void {
     this.unsubs.push({ agentId, process });
@@ -288,6 +290,56 @@ test('no agentId takes the local fan-out path unchanged (relay untouched)', asyn
     const msg = await received;
     assert.equal(msg.type, 'log');
     assert.equal(msg.line, 'local');
+    ws.close();
+    await once(ws, 'close');
+  } finally {
+    await h.close();
+  }
+});
+
+test("a relay 'pending' subscribe records the key so a later unsubscribe reaches the relay", async () => {
+  const relay = new SpyRelay();
+  relay.nextResult = 'pending';
+  const h = await boot({ mode: 'apikey', apiKey: API_KEY }, relay);
+  try {
+    const ws = new WebSocket(h.url, [`apikey.${API_KEY}`]);
+    const q = new MessageQueue(ws);
+    await once(ws, 'open');
+    await q.next(); // hello
+    ws.send(JSON.stringify({ type: 'log:subscribe', agentId: 'web-01', process: 'api' }));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(relay.subs.length, 1, 'relay received the pending subscribe');
+
+    // Even though the subscribe was 'pending', the key was recorded, so an
+    // explicit unsubscribe must reach the relay.
+    ws.send(JSON.stringify({ type: 'log:unsubscribe', agentId: 'web-01', process: 'api' }));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(relay.unsubs.length, 1, 'the recorded pending key is torn down on unsubscribe');
+    assert.deepEqual(relay.unsubs[0], { agentId: 'web-01', process: 'api' });
+    ws.close();
+    await once(ws, 'close');
+  } finally {
+    await h.close();
+  }
+});
+
+test("a relay 'rejected' subscribe does NOT record the key (no later unsubscribe)", async () => {
+  const relay = new SpyRelay();
+  relay.nextResult = 'rejected';
+  const h = await boot({ mode: 'apikey', apiKey: API_KEY }, relay);
+  try {
+    const ws = new WebSocket(h.url, [`apikey.${API_KEY}`]);
+    const q = new MessageQueue(ws);
+    await once(ws, 'open');
+    await q.next(); // hello
+    ws.send(JSON.stringify({ type: 'log:subscribe', agentId: 'web-01', process: 'api' }));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(relay.subs.length, 1);
+
+    // Key not recorded -> a later unsubscribe is a no-op (never reaches relay).
+    ws.send(JSON.stringify({ type: 'log:unsubscribe', agentId: 'web-01', process: 'api' }));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(relay.unsubs.length, 0, 'a rejected subscribe is not torn down');
     ws.close();
     await once(ws, 'close');
   } finally {

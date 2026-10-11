@@ -233,6 +233,10 @@ export class AgentGateway {
       heartbeatSec: this.heartbeatSec,
     });
 
+    // Re-assert any live log subscriptions (retained across a bounce or parked
+    // before this agent first registered) exactly once now that the link is up.
+    this.registry.resyncLogSubscriptions(entry.id);
+
     // Post-auth: route every subsequent frame to the registry; heartbeat ack.
     const socket = pending.socket;
     socket.on('message', (data) => this.onAuthedMessage(entry.id, socket, data));

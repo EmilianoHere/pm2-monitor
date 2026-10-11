@@ -77,6 +77,16 @@ const DEFAULT_CONTROL_TIMEOUT_MS = 15_000;
 interface LogRing {
   lines: LogLineForClient[];
   subscribers: Set<HumanLogClient>;
+  streams: Set<'out' | 'err'>;
+}
+
+/** The outcome of a subscribeLogs call (relayed to the hub). */
+export type SubscribeResult = 'subscribed' | 'pending' | 'rejected';
+
+/** A human log subscription parked before its agent has registered. */
+interface PendingLogSub {
+  subscribers: Set<HumanLogClient>;
+  streams: Set<'out' | 'err'>;
 }
 
 /** Per-agent isolated state. */
@@ -131,6 +141,8 @@ export class FleetRegistry {
   private readonly rand: () => number;
 
   private readonly entries = new Map<string, AgentEntry>();
+  /** agentId -> process -> subscription parked until the agent registers. */
+  private readonly pendingLogSubs = new Map<string, Map<string, PendingLogSub>>();
   private readonly fleetEvents = new EventEmitter();
 
   constructor(opts: FleetRegistryOptions) {
@@ -226,15 +238,32 @@ export class FleetRegistry {
       entry.online = true;
       entry.lastSeen = this.now();
     }
+    // Drain any subscriptions parked before this agent first registered into
+    // real log rings. Do NOT send the upstream log:subscribe here — the gateway
+    // issues a single resyncLogSubscriptions(entry.id) right after register:ack.
+    const parked = this.pendingLogSubs.get(agentId);
+    if (parked) {
+      for (const [process, pend] of parked) {
+        entry.logRings.set(process, {
+          lines: [],
+          subscribers: new Set(pend.subscribers),
+          streams: new Set(pend.streams),
+        });
+      }
+      this.pendingLogSubs.delete(agentId);
+    }
     this.emitFleet('agent:online', agentId);
     return entry;
   }
 
   /**
    * Marks an agent offline on socket close/error: rejects every in-flight
-   * command with AGENT_OFFLINE (so nothing hangs), clears its log subscribers,
-   * and RETAINS the entry (and its alias) so it shows as offline. Emits a
-   * single `agent:offline`.
+   * command with AGENT_OFFLINE (so nothing hangs) and RETAINS the entry (and
+   * its alias) so it shows as offline. The log rings (and their subscriber
+   * sets) are RETAINED across the bounce so a reconnect resumes the same
+   * subscriptions; the gateway re-asserts them upstream via
+   * resyncLogSubscriptions after the next register:ack. Emits a single
+   * `agent:offline`.
    */
   markOffline(agentId: string): void {
     const entry = this.entries.get(agentId);
@@ -244,7 +273,6 @@ export class FleetRegistry {
     entry.pm2Connected = false;
     entry.lastSeen = this.now();
     entry.pending.rejectAll({ ok: false, code: 'AGENT_OFFLINE', message: 'agent disconnected' });
-    entry.logRings.clear();
     this.emitFleet('agent:offline', agentId);
   }
 
@@ -382,34 +410,90 @@ export class FleetRegistry {
   // --- live log relay (ref-counted per process) ---
 
   /**
-   * Subscribes a human client to a process's live log relay. Creates the
-   * bounded ring on first subscribe and sends `log:subscribe` upstream to the
-   * agent then. Returns false (and sends nothing) if the agent is unknown.
+   * Subscribes a human client to a process's live log relay.
+   *
+   * For a KNOWN agent (online, or retained-offline): records the client in the
+   * ring (creating it on first subscribe), unions the requested streams into
+   * the ring, and sends `log:subscribe` upstream only on the FIRST subscriber
+   * when the agent is online with a live socket. Returns `'subscribed'`.
+   *
+   * For an UNKNOWN agent: parks the subscription in `pendingLogSubs` WITHOUT
+   * inventing an entry (size/ids/listAgents stay unchanged) and sends nothing.
+   * The parked sub is drained into a real ring on the agent's first register,
+   * then re-asserted upstream once by the gateway. Returns `'pending'`.
    */
-  subscribeLogs(agentId: string, process: string, streams: Array<'out' | 'err'>, client: HumanLogClient): boolean {
+  subscribeLogs(
+    agentId: string,
+    process: string,
+    streams: Array<'out' | 'err'>,
+    client: HumanLogClient,
+  ): SubscribeResult {
+    const useStreams = streams.length > 0 ? streams : (['out', 'err'] as Array<'out' | 'err'>);
     const entry = this.entries.get(agentId);
-    if (!entry) return false;
+    if (!entry) {
+      // Park without creating an agent entry.
+      let byProcess = this.pendingLogSubs.get(agentId);
+      if (!byProcess) {
+        byProcess = new Map();
+        this.pendingLogSubs.set(agentId, byProcess);
+      }
+      let pend = byProcess.get(process);
+      if (!pend) {
+        pend = { subscribers: new Set(), streams: new Set() };
+        byProcess.set(process, pend);
+      }
+      pend.subscribers.add(client);
+      for (const s of useStreams) pend.streams.add(s);
+      return 'pending';
+    }
     let ring = entry.logRings.get(process);
     const first = ring === undefined;
     if (!ring) {
-      ring = { lines: [], subscribers: new Set() };
+      ring = { lines: [], subscribers: new Set(), streams: new Set() };
       entry.logRings.set(process, ring);
     }
     ring.subscribers.add(client);
+    for (const s of useStreams) ring.streams.add(s);
     if (first && entry.online && entry.socket) {
-      const useStreams = streams.length > 0 ? streams : (['out', 'err'] as Array<'out' | 'err'>);
-      this.sendTo(entry, { type: 'log:subscribe', process, streams: useStreams });
+      this.sendTo(entry, { type: 'log:subscribe', process, streams: [...ring.streams] });
     }
-    return true;
+    return 'subscribed';
   }
 
   /**
-   * Unsubscribes a human client; on the LAST subscriber the ring is torn down
-   * and `log:unsubscribe` is sent upstream.
+   * Re-asserts every active log subscription for an agent upstream — called
+   * once by the gateway immediately after `register:ack`. For each process ring
+   * with at least one subscriber it sends a single `log:subscribe` carrying the
+   * ring's unioned streams, but only while the agent is online with a live
+   * socket. `register()` never calls this.
+   */
+  resyncLogSubscriptions(agentId: string): void {
+    const entry = this.entries.get(agentId);
+    if (!entry || !entry.online || !entry.socket) return;
+    for (const [process, ring] of entry.logRings) {
+      if (ring.subscribers.size === 0) continue;
+      this.sendTo(entry, { type: 'log:subscribe', process, streams: [...ring.streams] });
+    }
+  }
+
+  /**
+   * Unsubscribes a human client. When the agent has no entry yet the client is
+   * removed from the parked subscription (cleaning up empty maps) and nothing
+   * is sent. Otherwise, on the LAST subscriber the ring is torn down and
+   * `log:unsubscribe` is sent upstream only while the agent is online.
    */
   unsubscribeLogs(agentId: string, process: string, client: HumanLogClient): void {
     const entry = this.entries.get(agentId);
-    if (!entry) return;
+    if (!entry) {
+      const byProcess = this.pendingLogSubs.get(agentId);
+      if (!byProcess) return;
+      const pend = byProcess.get(process);
+      if (!pend) return;
+      pend.subscribers.delete(client);
+      if (pend.subscribers.size === 0) byProcess.delete(process);
+      if (byProcess.size === 0) this.pendingLogSubs.delete(agentId);
+      return;
+    }
     const ring = entry.logRings.get(process);
     if (!ring) return;
     ring.subscribers.delete(client);

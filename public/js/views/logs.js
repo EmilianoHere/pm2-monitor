@@ -29,6 +29,7 @@ export class LogsView {
     this.q = '';
     this.levelFilter = 'all'; // 'all' | 'info' | 'error'
     this.offLog = null;
+    this.offState = null;
   }
 
   async mount(name) {
@@ -45,6 +46,17 @@ export class LogsView {
       this.append({ stream: msg.stream, level: msg.level, line: msg.line, ts: msg.ts });
     });
     this.ws.logSubscribe(name, ['out', 'err'], this.agentId);
+
+    // Agent-scoped re-arm (server mode only): when the human WS reconnects, the
+    // server may have just (re)registered the agent, so re-send the subscription
+    // once. The re-send is idempotent (ws.js overwrites logSubs; the server
+    // dedupes via the ring/parked subscriber set). Standalone (no agentId) adds
+    // no listener so its behavior is byte-identical.
+    if (this.agentId) {
+      this.offState = this.ws.on('state', () => {
+        if (this.process) this.ws.logSubscribe(this.process, ['out', 'err'], this.agentId);
+      });
+    }
 
     // Initial backfill.
     try {
@@ -63,6 +75,10 @@ export class LogsView {
     if (this.offLog) {
       this.offLog();
       this.offLog = null;
+    }
+    if (this.offState) {
+      this.offState();
+      this.offState = null;
     }
     if (this.process) this.ws.logUnsubscribe(this.process, this.agentId);
     this.process = null;

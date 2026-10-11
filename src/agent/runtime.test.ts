@@ -194,6 +194,28 @@ test('frames are dropped while disconnected', () => {
   assert.equal(h.sent.length, 0, 'nothing is sent when not registered');
 });
 
+test('onDisconnected clears the forwarder; a post-re-register log:subscribe re-populates it so lines flow again', () => {
+  const h = makeHarness();
+  // Subscribe to a process and confirm a live line is forwarded.
+  h.runtime.handleMessage({ type: 'log:subscribe', process: 'api', streams: ['out'] });
+  h.events.emit('log:line', { process: 'api', stream: 'out', level: 'info', line: 'before', ts: 1 });
+  const first = sentOfType(h.sent, 'log:line');
+  assert.equal(first.length, 1, 'subscribed line forwarded');
+  assert.equal(first[0].line, 'before');
+
+  // Link teardown clears the forwarder: no further lines flow.
+  h.runtime.onDisconnected();
+  h.events.emit('log:line', { process: 'api', stream: 'out', level: 'info', line: 'dropped', ts: 2 });
+  assert.equal(sentOfType(h.sent, 'log:line').length, 1, 'no lines forwarded after disconnect clears the forwarder');
+
+  // The server resync (post-re-register) re-sends log:subscribe, re-priming it.
+  h.runtime.handleMessage({ type: 'log:subscribe', process: 'api', streams: ['out'] });
+  h.events.emit('log:line', { process: 'api', stream: 'out', level: 'info', line: 'after', ts: 3 });
+  const afterLines = sentOfType(h.sent, 'log:line');
+  assert.equal(afterLines.length, 2, 'lines flow again after the resync re-primes the forwarder');
+  assert.equal(afterLines[1].line, 'after');
+});
+
 test('pm2 connectivity transitions forward update:pm2', () => {
   const h = makeHarness();
   h.state.setConnected(true);

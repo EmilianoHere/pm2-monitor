@@ -52,13 +52,16 @@ export interface RelayLogClient {
  * subscribeLogs/unsubscribeLogs surface. `agentId`/`process` are validated by
  * the hub BEFORE any call here.
  */
+/** The outcome of a relay subscribe (mirrors the registry's SubscribeResult). */
+export type SubscribeResult = 'subscribed' | 'pending' | 'rejected';
+
 export interface FleetLogRelay {
   subscribeLogs(
     agentId: string,
     process: string,
     streams: Array<'out' | 'err'>,
     client: RelayLogClient,
-  ): boolean;
+  ): SubscribeResult;
   unsubscribeLogs(agentId: string, process: string, client: RelayLogClient): void;
 }
 
@@ -332,9 +335,11 @@ export class WsHub {
     }
     const relayClient = this.relayClientFor(client);
     const key = `${agentId}/${process}`;
-    if (this.relay.subscribeLogs(agentId, process, useStreams, relayClient)) {
-      client.relaySubs.add(key);
-    }
+    // Record the key on any non-'rejected' result so a 'pending' subscription
+    // (agent not yet registered) is still tracked for later teardown and so a
+    // relayed line can be matched once the agent registers.
+    const result = this.relay.subscribeLogs(agentId, process, useStreams, relayClient);
+    if (result !== 'rejected') client.relaySubs.add(key);
   }
 
   private handleRelayUnsubscribe(client: ClientState, m: Record<string, unknown>): void {

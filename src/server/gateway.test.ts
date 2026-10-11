@@ -335,6 +335,20 @@ test('rejects a register with a REVOKED store token: AUTH_FAILED + no entry (AC-
   assert.equal(registry.get('web-01'), undefined, 'not registered');
 });
 
+test('resync fires exactly once after register:ack for a prior (parked) subscription (AC-25)', () => {
+  const { gateway, registry } = makeGateway();
+  // A human subscribes BEFORE the agent registers: parked as pending.
+  const result = registry.subscribeLogs('web-01', 'api', ['out', 'err'], { deliver: () => {} });
+  assert.equal(result, 'pending');
+
+  const s = new FakeSocket();
+  gateway.handleSocket(s);
+  s.emit('message', registerFrame());
+  assert.ok(s.lastOfType('register:ack'), 'register:ack sent');
+  // The gateway resync drains+asserts the parked sub exactly once.
+  assert.equal(s.sent.filter((m) => m.type === 'log:subscribe').length, 1, 'exactly one upstream subscribe after ack');
+});
+
 test('the resolver is consulted at validation time: a token generated AFTER construction authenticates (AC-10)', async () => {
   const store = makeStore();
   const { gateway, registry } = makeGateway({ tokens: [], store });

@@ -206,6 +206,200 @@ test('first subscribe sends log:subscribe upstream; last unsubscribe sends log:u
   assert.ok(socket.lastOfType('log:unsubscribe'), 'last unsubscribe tears down upstream');
 });
 
+test('warm path: first subscribe sends exactly one upstream subscribe and lines fan out (AC-25/26)', () => {
+  const { reg } = makeRegistry();
+  const socket = new FakeAgentSocket();
+  reg.register('web-01', META, socket);
+  const got: LogLineForClient[] = [];
+  const client: HumanLogClient = { deliver: (l) => got.push(l) };
+
+  const result = reg.subscribeLogs('web-01', 'api', ['out', 'err'], client);
+  assert.equal(result, 'subscribed');
+  assert.equal(socket.sent.filter((m) => m.type === 'log:subscribe').length, 1, 'exactly one upstream subscribe');
+
+  reg.handleFrame('web-01', { type: 'log:line', process: 'api', stream: 'out', level: 'info', line: 'hi', ts: 1 });
+  assert.equal(got.length, 1, 'line fanned out to the subscriber');
+  assert.equal(got[0].line, 'hi');
+});
+
+test('cold known-but-offline subscribe sends nothing; register+resync sends exactly one and lines arrive (AC-25)', () => {
+  const { reg } = makeRegistry();
+  const socket1 = new FakeAgentSocket();
+  reg.register('web-01', META, socket1);
+  reg.markOffline('web-01');
+
+  const got: LogLineForClient[] = [];
+  const client: HumanLogClient = { deliver: (l) => got.push(l) };
+  const result = reg.subscribeLogs('web-01', 'api', ['out', 'err'], client);
+  assert.equal(result, 'subscribed', 'a retained-offline agent is known');
+  assert.equal(socket1.sent.filter((m) => m.type === 'log:subscribe').length, 0, 'nothing sent while offline');
+
+  // Reconnect: a new socket, then the gateway-driven resync.
+  const socket2 = new FakeAgentSocket();
+  reg.register('web-01', META, socket2);
+  reg.resyncLogSubscriptions('web-01');
+  assert.equal(socket2.sent.filter((m) => m.type === 'log:subscribe').length, 1, 'resync sends exactly one subscribe');
+
+  reg.handleFrame('web-01', { type: 'log:line', process: 'api', stream: 'err', level: 'error', line: 'boom', ts: 2 });
+  assert.equal(got.length, 1, 'lines flow after reconnect+resync');
+  assert.equal(got[0].line, 'boom');
+});
+
+test('never-registered subscribe parks as pending without inventing an agent, then drains on register (core fix)', () => {
+  const { reg } = makeRegistry();
+  const got: LogLineForClient[] = [];
+  const client: HumanLogClient = { deliver: (l) => got.push(l) };
+
+  const result = reg.subscribeLogs('web-01', 'api', ['out', 'err'], client);
+  assert.equal(result, 'pending', 'a never-registered agent parks the sub');
+  // The agent must NOT exist yet.
+  assert.equal(reg.size, 0, 'no agent entry invented');
+  assert.deepEqual(reg.ids(), [], 'ids() shows no agent');
+  assert.equal(reg.get('web-01'), undefined);
+
+  // First register drains the parked sub into a real ring; gateway resync sends.
+  const socket = new FakeAgentSocket();
+  reg.register('web-01', META, socket);
+  assert.equal(socket.sent.filter((m) => m.type === 'log:subscribe').length, 0, 'register does not send upstream');
+  reg.resyncLogSubscriptions('web-01');
+  assert.equal(socket.sent.filter((m) => m.type === 'log:subscribe').length, 1, 'resync sends exactly one subscribe');
+
+  reg.handleFrame('web-01', { type: 'log:line', process: 'api', stream: 'out', level: 'info', line: 'first', ts: 3 });
+  assert.equal(got.length, 1, 'the drained subscription receives lines');
+  assert.equal(got[0].line, 'first');
+});
+
+test('a pending sub torn down before register leaves no leak; a later register drains nothing', () => {
+  const { reg } = makeRegistry();
+  const client: HumanLogClient = { deliver: () => {} };
+  assert.equal(reg.subscribeLogs('web-01', 'api', ['out', 'err'], client), 'pending');
+  // Tear it down before the agent ever registers.
+  reg.unsubscribeLogs('web-01', 'api', client);
+
+  const socket = new FakeAgentSocket();
+  reg.register('web-01', META, socket);
+  reg.resyncLogSubscriptions('web-01');
+  assert.equal(socket.sent.filter((m) => m.type === 'log:subscribe').length, 0, 'nothing to drain, nothing sent');
+  assert.deepEqual([...reg.get('web-01')!.logRings.keys()], [], 'no ring created from a torn-down pending sub');
+});
+
+test('two clients share one upstream subscribe; one unsubscribes leaves the other streaming (AC-27)', () => {
+  const { reg } = makeRegistry();
+  const socket = new FakeAgentSocket();
+  reg.register('web-01', META, socket);
+  const gotA: LogLineForClient[] = [];
+  const gotB: LogLineForClient[] = [];
+  const a: HumanLogClient = { deliver: (l) => gotA.push(l) };
+  const b: HumanLogClient = { deliver: (l) => gotB.push(l) };
+
+  reg.subscribeLogs('web-01', 'api', ['out', 'err'], a);
+  reg.subscribeLogs('web-01', 'api', ['out', 'err'], b);
+  assert.equal(socket.sent.filter((m) => m.type === 'log:subscribe').length, 1, 'shared single upstream');
+
+  reg.unsubscribeLogs('web-01', 'api', a);
+  assert.equal(socket.lastOfType('log:unsubscribe'), undefined, 'ring kept while b remains');
+  reg.handleFrame('web-01', { type: 'log:line', process: 'api', stream: 'out', level: 'info', line: 'still', ts: 4 });
+  assert.equal(gotA.length, 0, 'the unsubscribed client gets nothing');
+  assert.equal(gotB.length, 1, 'the remaining client keeps streaming');
+});
+
+test('last unsubscribe deletes the ring and sends one log:unsubscribe online, none offline (AC-26/30)', () => {
+  const { reg } = makeRegistry();
+  const socket = new FakeAgentSocket();
+  reg.register('web-01', META, socket);
+  const client: HumanLogClient = { deliver: () => {} };
+  reg.subscribeLogs('web-01', 'api', ['out', 'err'], client);
+  reg.unsubscribeLogs('web-01', 'api', client);
+  assert.equal(socket.sent.filter((m) => m.type === 'log:unsubscribe').length, 1, 'one upstream unsubscribe online');
+  assert.equal(reg.get('web-01')!.logRings.has('api'), false, 'ring deleted on last unsubscribe');
+
+  // Offline last unsubscribe sends nothing upstream.
+  const socket2 = new FakeAgentSocket();
+  reg.register('web-02', META, socket2);
+  reg.subscribeLogs('web-02', 'api', ['out', 'err'], client);
+  reg.markOffline('web-02');
+  reg.unsubscribeLogs('web-02', 'api', client);
+  assert.equal(socket2.sent.filter((m) => m.type === 'log:unsubscribe').length, 0, 'no upstream unsubscribe offline');
+});
+
+test('log rings survive a bounce: ring + subscribers retained, resync resumes lines (AC-25/31)', () => {
+  const { reg } = makeRegistry();
+  const socket1 = new FakeAgentSocket();
+  reg.register('web-01', META, socket1);
+  const got: LogLineForClient[] = [];
+  const client: HumanLogClient = { deliver: (l) => got.push(l) };
+  reg.subscribeLogs('web-01', 'api', ['out'], client);
+  reg.handleFrame('web-01', { type: 'log:line', process: 'api', stream: 'out', level: 'info', line: 'before', ts: 1 });
+  assert.equal(reg.recentLogs('web-01', 'api').length, 1);
+
+  reg.markOffline('web-01');
+  // The ring and its subscriber set survive the bounce.
+  assert.equal(reg.get('web-01')!.logRings.has('api'), true, 'ring retained across the bounce');
+  assert.ok(reg.recentLogs('web-01', 'api').length >= 1, 'backfill non-empty after offline');
+
+  const socket2 = new FakeAgentSocket();
+  reg.register('web-01', META, socket2);
+  reg.resyncLogSubscriptions('web-01');
+  assert.equal(socket2.sent.filter((m) => m.type === 'log:subscribe').length, 1, 'resync resumes the subscription');
+  reg.handleFrame('web-01', { type: 'log:line', process: 'api', stream: 'out', level: 'info', line: 'after', ts: 2 });
+  assert.equal(got.filter((l) => l.line === 'after').length, 1, 'lines resume after reconnect');
+});
+
+test('process and agent isolation: lines do not cross-talk (AC-29)', () => {
+  const { reg } = makeRegistry();
+  reg.register('web-01', META, new FakeAgentSocket());
+  reg.register('web-02', META, new FakeAgentSocket());
+  const gotApi: LogLineForClient[] = [];
+  const gotWorker: LogLineForClient[] = [];
+  const gotOther: LogLineForClient[] = [];
+  reg.subscribeLogs('web-01', 'api', ['out'], { deliver: (l) => gotApi.push(l) });
+  reg.subscribeLogs('web-01', 'worker', ['out'], { deliver: (l) => gotWorker.push(l) });
+  reg.subscribeLogs('web-02', 'api', ['out'], { deliver: (l) => gotOther.push(l) });
+
+  reg.handleFrame('web-01', { type: 'log:line', process: 'api', stream: 'out', level: 'info', line: 'a', ts: 1 });
+  assert.equal(gotApi.length, 1);
+  assert.equal(gotWorker.length, 0, 'another process on the same agent is isolated');
+  assert.equal(gotOther.length, 0, 'another agent is isolated');
+});
+
+test('the per-(agentId,process) ring stays bounded at 200 lines (AC-30/31)', () => {
+  const { reg } = makeRegistry();
+  reg.register('web-01', META, new FakeAgentSocket());
+  reg.subscribeLogs('web-01', 'api', ['out'], { deliver: () => {} });
+  for (let i = 0; i < 250; i++) {
+    reg.handleFrame('web-01', { type: 'log:line', process: 'api', stream: 'out', level: 'info', line: `l${i}`, ts: i });
+  }
+  const recent = reg.recentLogs('web-01', 'api');
+  assert.equal(recent.length, 200, 'ring capped at 200');
+  assert.equal(recent[recent.length - 1].line, 'l249', 'newest line retained');
+});
+
+test('resyncLogSubscriptions is a no-op while the agent is offline or unknown', () => {
+  const { reg } = makeRegistry();
+  const socket = new FakeAgentSocket();
+  reg.register('web-01', META, socket);
+  reg.subscribeLogs('web-01', 'api', ['out'], { deliver: () => {} });
+  socket.sent.length = 0;
+  reg.markOffline('web-01');
+  reg.resyncLogSubscriptions('web-01');
+  assert.equal(socket.sent.filter((m) => m.type === 'log:subscribe').length, 0, 'no send while offline');
+  // Unknown agent is a harmless no-op.
+  reg.resyncLogSubscriptions('ghost');
+});
+
+test('subscribeLogs unions streams into the ring and resync replays the union', () => {
+  const { reg } = makeRegistry();
+  const socket = new FakeAgentSocket();
+  reg.register('web-01', META, socket);
+  reg.subscribeLogs('web-01', 'api', ['out'], { deliver: () => {} });
+  reg.subscribeLogs('web-01', 'api', ['err'], { deliver: () => {} });
+  socket.sent.length = 0;
+  reg.resyncLogSubscriptions('web-01');
+  const sub = socket.lastOfType('log:subscribe');
+  assert.ok(sub);
+  assert.deepEqual([...sub!.streams].sort(), ['err', 'out'], 'resync carries the unioned streams');
+});
+
 test('snapshot prune drops a departed process series so it is no longer seen', () => {
   const { reg } = makeRegistry();
   reg.register('web-01', META, new FakeAgentSocket());
