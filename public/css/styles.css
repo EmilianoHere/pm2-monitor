@@ -925,3 +925,113 @@ select {
   min-width: 28px;
   padding: 4px 8px;
 }
+
+/* ============================================================
+   DETAIL PANEL (FEAT-003): right-side process detail column —
+   name + status, metric tiles, meta row, actions, live log tail,
+   and the collapsible Historial sub-section (chart + errors).
+   Reuses the :root tokens and the existing .status--* classes.
+   ============================================================ */
+.detail-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap);
+}
+
+.detail-panel__head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-panel__name {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  word-break: break-all;
+}
+
+/* --- Metric tiles grid --- */
+.metric-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metric-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.metric-tile__label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.metric-tile__value {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+/* --- Meta row (PID / Modo / Grupo) --- */
+.detail-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.detail-meta__row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.detail-meta__row dt {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.detail-meta__row dd {
+  margin: 0;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+/* --- Action row --- */
+.detail-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* --- Collapsible Historial sub-section --- */
+.detail-history__toggle {
+  width: 100%;
+  text-align: left;
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.detail-history__toggle:hover {
+  border-color: var(--accent-dim);
+}
+
+.detail-history__body {
+  margin-top: 10px;
+}
