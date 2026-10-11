@@ -131,8 +131,9 @@ export const api = {
     request('POST', `${processBase(agentId)}/${encodeURIComponent(name)}/${action}`),
   deleteProcess: (name, agentId) =>
     agentId
-      ? // Agent-scoped delete is a POST action (routed control), not a DELETE verb.
-        request('POST', `${processBase(agentId)}/${encodeURIComponent(name)}/delete`)
+      ? // Agent-scoped delete uses the DELETE verb on the agent process path —
+        // the only agent-delete route registered in src/api/routes/agents.ts.
+        request('DELETE', `/api/agents/${encodeURIComponent(agentId)}/processes/${encodeURIComponent(name)}`)
       : request('DELETE', `/api/processes/${encodeURIComponent(name)}`),
 
   // --- errors (optional agentId selects the agent-scoped path) ---
