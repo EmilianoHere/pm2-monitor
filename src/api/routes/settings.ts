@@ -18,14 +18,28 @@
  */
 
 import { Router } from 'express';
-import type { ApiDeps } from '../server.js';
 import { validate } from '../validate.js';
 import { keyGenerate, keyIdParam, keyRelabel, secretFieldParam, settingsPut } from '../schemas.js';
 import type { SecretsOverlayKey } from '../../config/env.js';
+import type { ApiKeyService } from '../../server/apiKeyStore.js';
+import type { SettingsService } from '../../config/settingsService.js';
+import type { AuthConfig } from '../auth.js';
 
-export function createSettingsRouter(deps: ApiDeps): Router {
+/**
+ * The narrow dependency surface this router actually reads. The standalone
+ * `ApiDeps` is assignable to it (settings/apiKeys optional there, required
+ * here), and server boot builds the SAME services and passes them directly, so
+ * both modes mount one identical router with no forked logic.
+ */
+export interface SettingsRouterDeps {
+  settings?: SettingsService;
+  apiKeys?: ApiKeyService;
+  auth: Pick<AuthConfig, 'mode'>;
+}
+
+export function createSettingsRouter(deps: SettingsRouterDeps): Router {
   const router = Router();
-  // These are guaranteed present by the mount guard in server.ts.
+  // These are guaranteed present by the mount guard in the boot path.
   const settings = deps.settings!;
   const apiKeys = deps.apiKeys!;
 

@@ -34,12 +34,17 @@ import { createAuthMiddleware } from '../api/auth.js';
 import { createServerHealthRouter } from '../api/routes/system.js';
 import { createAgentsRouter, type FleetDeps, type AgentListRow, type AgentDetail, type AgentLogLine } from '../api/routes/agents.js';
 import { createAgentTokensRouter } from '../api/routes/agentTokens.js';
+import { createSettingsRouter } from '../api/routes/settings.js';
 import { requireMaster } from '../api/auth.js';
 import { WsHub, type FleetLogRelay } from '../ws/hub.js';
 import { FleetRegistry } from '../server/registry.js';
 import { AgentGateway } from '../server/gateway.js';
 import { AliasStore } from '../server/aliasStore.js';
 import { AgentTokenStore, AgentTokenService } from '../server/agentTokenStore.js';
+import { ApiKeyStore, ApiKeyService } from '../server/apiKeyStore.js';
+import { SettingsStore } from '../config/settingsStore.js';
+import { SecretsStore } from '../config/secretsStore.js';
+import { SettingsService } from '../config/settingsService.js';
 import { buildAgentAuthConfig, type AgentTokenResolver } from '../server/agentAuth.js';
 import {
   GlobalMaintenanceState,
@@ -142,6 +147,18 @@ export async function bootstrapServer(config: Readonly<AppConfig>, logger: Logge
   await agentTokenStore.load();
   const agentTokens = new AgentTokenService(agentTokenStore);
 
+  // --- settings overlay stores (same files/paths/pattern as standalone) ---
+  // The hub persists its OWN settings/keys/secrets to the gitignored config/*.json
+  // files, exactly like standalone. With no files present these start empty, so a
+  // first server boot creates nothing and behaves as before.
+  const apiKeyStore = new ApiKeyStore({ file: 'config/api-keys.json', logger });
+  const settingsStore = new SettingsStore({ file: 'config/settings.json', logger });
+  const secretsStore = new SecretsStore({ file: 'config/secrets.json', logger });
+  await apiKeyStore.load();
+  await settingsStore.load();
+  await secretsStore.load();
+  const apiKeys = new ApiKeyService(apiKeyStore);
+
   // --- channels ---
   const teams = new TeamsChannel({
     ...(config.TEAMS_WEBHOOK_URL !== undefined ? { webhookUrl: config.TEAMS_WEBHOOK_URL } : {}),
@@ -166,10 +183,29 @@ export async function bootstrapServer(config: Readonly<AppConfig>, logger: Logge
   });
   const bridge = new FleetAlertBridge({ registry, aliases, engine, events: fleetEvents });
 
+  // --- settings service (hot-apply over the live hub handles) ---
+  // The hub owns teams/email/engine; it has no DigestScheduler or ErrorTracker,
+  // so DIGEST_*/ERROR_LOG_APPEND hot-apply to inert no-ops (their overlay values
+  // still persist and take effect on restart). `base` is the frozen .env config,
+  // identical to standalone's wiring.
+  const settingsService = new SettingsService({
+    settingsStore,
+    secretsStore,
+    base: config,
+    handles: {
+      teams,
+      email,
+      engine,
+      digest: { setEnabled: () => {}, setDigestHour: () => {} },
+      errors: { setLogAppend: () => {} },
+      logger,
+    },
+  });
+
   // --- HTTP(S) server (native TLS when the cert+key pair is set) ---
   const schemas = buildSchemas({ allowedScriptRoot: config.ALLOWED_SCRIPT_ROOT });
   const startedAt = Date.now();
-  const app = buildServerApp({ config, logger, maintenance, registry, aliases, agentTokens, engine, schemas, startedAt, getRules: () => rules, setRules: (r) => { rules = r; } });
+  const app = buildServerApp({ config, logger, maintenance, registry, aliases, agentTokens, apiKeys, settings: settingsService, engine, schemas, startedAt, getRules: () => rules, setRules: (r) => { rules = r; } });
 
   let server: Server;
   if (config.TLS_CERT_FILE && config.TLS_KEY_FILE) {
@@ -196,6 +232,7 @@ export async function bootstrapServer(config: Readonly<AppConfig>, logger: Logge
     server,
     events: fleetEvents,
     auth: buildAuthConfig(config),
+    keys: apiKeyStore,
     logger,
     snapshot: emptySnapshot,
     relay,
@@ -259,6 +296,10 @@ interface ServerAppDeps {
   registry: FleetRegistry;
   aliases: AliasStore;
   agentTokens: AgentTokenService;
+  /** Human secondary-api-key management service (same as standalone). */
+  apiKeys: ApiKeyService;
+  /** Settings orchestration service for the hub's own config/secrets. */
+  settings: SettingsService;
   engine: AlertEngine;
   schemas: RequestSchemas;
   startedAt: number;
@@ -295,8 +336,10 @@ export function buildServerApp(deps: ServerAppDeps): express.Express {
     }),
   );
 
-  // Everything else under /api requires the human auth (unchanged credential space).
-  app.use('/api', createAuthMiddleware(buildAuthConfig(config)));
+  // Everything else under /api requires the human auth (unchanged credential
+  // space). Secondary human keys are honored via the api-key store verifier,
+  // exactly like standalone; they remain SEPARATE from agent tokens.
+  app.use('/api', createAuthMiddleware(buildAuthConfig(config), deps.apiKeys));
 
   // Global maintenance toggle (reuses the human route shape against the holder).
   app.use('/api/maintenance', createMaintenanceRouter(deps.maintenance, deps.schemas));
@@ -307,9 +350,11 @@ export function buildServerApp(deps: ServerAppDeps): express.Express {
   // Unified fleet surface.
   app.use('/api/agents', createAgentsRouter({ fleet: buildFleetDeps(deps.registry, deps.aliases), schemas: deps.schemas, now: () => Date.now() }));
 
-  // Master-only settings surface: whoami + agent-token management. Mounted
-  // behind requireMaster (the global /api auth already ran), BEFORE the /api 404.
-  app.use('/api/settings', requireMaster, createServerSettingsRouter(deps.agentTokens, config));
+  // Master-only settings surface: the FULL config/keys/secrets router (identical
+  // to standalone) PLUS the server-only agent-token management and whoami.
+  // Mounted behind requireMaster (the global /api auth already ran), BEFORE the
+  // /api 404 so GET '/', PUT '/', /keys, /secrets all resolve.
+  app.use('/api/settings', requireMaster, createServerSettingsRouter(deps.agentTokens, deps.apiKeys, deps.settings, config));
 
   // Static dashboard shell (unauthenticated), identical to standalone — the same
   // public/ assets serve the fleet UI, which discovers server mode from health.
@@ -337,17 +382,28 @@ export function buildServerApp(deps: ServerAppDeps): express.Express {
 // --- small inline routers reused from the human surface shapes ---
 
 /**
- * The server-mode master settings router: a whoami identity probe (reaching it
- * already proves master, since the mount is behind requireMaster) plus the four
- * agent-token routes under /agent-tokens. authMode is derived from
- * buildAuthConfig(config).mode (NOT config.MODE/config.AUTH_MODE).
+ * The server-mode master settings router. It mounts the SAME full settings
+ * router standalone uses (GET '/' config, PUT '/', DELETE '/secrets/:field',
+ * GET/POST '/keys', DELETE/PATCH '/keys/:id', GET '/whoami') so the dashboard
+ * Settings view and its Configuration/API-key/secrets panels work against the
+ * hub, PLUS the server-only agent-token routes under '/agent-tokens'. The
+ * server-only agent-tokens sub-router is mounted FIRST so its path can never be
+ * shadowed by the shared router; whoami/authMode come from the shared router
+ * (derived from buildAuthConfig(config).mode).
  */
-export function createServerSettingsRouter(agentTokens: AgentTokenService, config: Readonly<AppConfig>): Router {
+export function createServerSettingsRouter(
+  agentTokens: AgentTokenService,
+  apiKeys: ApiKeyService,
+  settings: SettingsService,
+  config: Readonly<AppConfig>,
+): Router {
   const router = Router();
-  router.get('/whoami', (_req, res) => {
-    res.json({ isMaster: true, authMode: buildAuthConfig(config).mode });
-  });
+  // Server-only: agent-token management (a SEPARATE credential space from the
+  // human api-keys handled by the shared router's /keys).
   router.use('/agent-tokens', createAgentTokensRouter(agentTokens));
+  // The identical standalone settings router (config + human keys + secrets +
+  // whoami). Reuses the SAME services the hub constructs; no forked logic.
+  router.use('/', createSettingsRouter({ settings, apiKeys, auth: { mode: buildAuthConfig(config).mode } }));
   return router;
 }
 
