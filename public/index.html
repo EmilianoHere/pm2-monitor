@@ -1,11 +1,11 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PM2 Monitor</title>
     <link rel="stylesheet" href="/css/styles.css" />
-    <!-- Chart.js via CDN; the detail view degrades to a numeric table if blocked. -->
+    <!-- Chart.js via CDN; the detail panel degrades to a numeric table if blocked. -->
     <script
       defer
       src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
@@ -17,36 +17,51 @@
         <span class="topbar__logo">PM2</span>
         <span class="topbar__title">Monitor</span>
       </div>
+      <!-- Both tabs always render (AC-1). Standalone #/fleet redirects to
+           #/processes on the route side; the tab is never hidden/disabled. -->
       <nav class="topbar__nav" id="nav">
-        <button type="button" class="nav__link" data-route="overview">Overview</button>
+        <button type="button" class="nav__link" data-route="processes">Procesos</button>
+        <button type="button" class="nav__link" data-route="fleet">Fleet</button>
       </nav>
       <div class="topbar__status">
-        <span class="conn conn--ws" id="ws-status" title="Dashboard WebSocket">WS</span>
-        <label class="maint-toggle" title="Suppress alert delivery while monitoring continues">
+        <span class="topbar__host" id="host-indicator" title="Host"></span>
+        <span class="conn conn--ws" id="ws-status" title="WebSocket del dashboard">
+          Conectando…
+        </span>
+        <label class="maint-toggle" title="Silencia el envío de alertas mientras continúa el monitoreo">
           <input type="checkbox" id="maintenance-toggle" />
-          <span>Maintenance</span>
+          <span>Mantenimiento</span>
         </label>
-        <button type="button" class="btn btn--ghost" id="logout-btn" title="Clear stored credentials">
-          Sign out
+        <button type="button" class="btn btn--ghost" id="logout-btn" title="Borra las credenciales guardadas">
+          Cerrar sesión
         </button>
       </div>
     </header>
 
-    <!-- Global PM2-unreachable banner (hidden until the pm2 message says so). -->
+    <!-- Global PM2-unreachable banner (standalone only; hidden until the pm2
+         message says so). -->
     <div class="banner banner--warn" id="pm2-banner" hidden role="status">
       <span id="pm2-banner-text">PM2 daemon unreachable — reconnecting…</span>
     </div>
 
     <main id="app" class="app">
-      <!-- Views render here. The fleet view is only populated in server mode. -->
+      <!-- PROCESOS: a two-column grid (table surface + right detail panel). The
+           detail panel column is hidden until a process row is selected. -->
+      <section id="view-processes" class="view">
+        <div class="proc-layout" id="proc-layout">
+          <div class="proc-layout__main" id="view-processes-main"></div>
+          <aside class="proc-layout__detail" id="detail-panel" hidden></aside>
+        </div>
+      </section>
+
+      <!-- FLEET: only populated in server mode. -->
       <section id="view-fleet" class="view" hidden></section>
-      <section id="view-overview" class="view"></section>
-      <section id="view-detail" class="view" hidden></section>
+
       <!-- Settings view: only populated for a master session (whoami 200). -->
       <section id="view-settings" class="view" hidden></section>
     </main>
 
-    <!-- Reusable confirm dialog for destructive actions (AC9/AC14). -->
+    <!-- Reusable confirm dialog for destructive actions. -->
     <div class="modal" id="confirm-modal" hidden>
       <div class="modal__backdrop" data-confirm-cancel></div>
       <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
@@ -55,6 +70,19 @@
         <div class="modal__actions">
           <button type="button" class="btn btn--ghost" data-confirm-cancel>Cancel</button>
           <button type="button" class="btn btn--danger" id="confirm-ok">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connect-agent modal (server mode). Body is populated by AgentsView with
+         PLACEHOLDERS ONLY — never a real token/secret. -->
+    <div class="modal" id="connect-modal" hidden>
+      <div class="modal__backdrop" data-connect-close></div>
+      <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="connect-title">
+        <h2 class="modal__title" id="connect-title">Conectar agente</h2>
+        <div class="modal__body" data-connect-body></div>
+        <div class="modal__actions">
+          <button type="button" class="btn btn--primary" data-connect-close>Cerrar</button>
         </div>
       </div>
     </div>

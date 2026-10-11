@@ -1337,3 +1337,57 @@ select {
 .connect-modal__docs a {
   color: var(--accent);
 }
+
+/* ============================================================
+   FEAT-005 shell: top-bar host indicator + PROCESOS two-column
+   layout (table surface + right detail-panel column, hidden
+   until a row is selected). Reuses the :root tokens.
+   ============================================================ */
+
+/* Host indicator in the top bar (dashboard origin, + agent id on drill-down). */
+.topbar__host {
+  font-size: 12px;
+  color: var(--text-dim);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Two-column PROCESOS grid. Single column until a selection reveals the detail
+   panel (the #view-processes section gets .has-detail), and always single column
+   on narrow viewports. */
+.proc-layout {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--gap);
+  align-items: start;
+}
+
+#view-processes.has-detail .proc-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+}
+
+.proc-layout__main {
+  min-width: 0;
+}
+
+.proc-layout__detail {
+  min-width: 0;
+  position: sticky;
+  top: 20px;
+}
+
+.proc-layout__detail[hidden] {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  #view-processes.has-detail .proc-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .proc-layout__detail {
+    position: static;
+  }
+}

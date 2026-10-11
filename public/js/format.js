@@ -1,5 +1,5 @@
 // Humanization helpers shared across the redesigned front-end. `fmtBytes` and
-// `fmtUptime` are moved VERBATIM from views/overview.js so the new components
+// `fmtUptime` were moved VERBATIM from the old overview view so the new components
 // (processes.js, detailPanel.js, agents.js) import them without depending on a
 // deleted file. `fmtBytesTotal` is a NEW dedicated two-decimal formatter for the
 // PROCESOS "Memoria total" summary card; `fmtRelativeAge` humanizes the Fleet

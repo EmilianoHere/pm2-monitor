@@ -1,31 +1,37 @@
-// Bootstrap: read/prompt for auth into sessionStorage, open the WebSocket, route
-// between the overview and detail views, render the PM2-unreachable banner from
-// the WS `pm2` message, and drive the maintenance toggle via POST /api/maintenance.
+// Bootstrap + orchestration. Reads/prompts for auth into sessionStorage, opens
+// the WebSocket, discovers the run mode, constructs the view registry
+// (ProcessesView + DetailPanel, AgentsView in server mode, SettingsView for a
+// master session), and hands navigation to the hash router. The router is the
+// SOLE owner of window.location.hash; app.renderRoute(route) is the single
+// hash -> render path. Row clicks, tab clicks, and Fleet links set the hash and
+// re-enter here via hashchange — nothing mutates the DOM/history directly.
 //
 // Mode discovery: GET /api/system/health carries a `mode` field. In standalone
-// the dashboard behaves exactly as before — no agent concepts, the local process
-// snapshot drives the overview, and every path below is byte-identical to today.
-// In server mode the dashboard first shows a fleet overview (agent cards); the
-// per-agent overview/detail reuse the SAME components parameterized by an agentId
-// so only the REST/WS base path changes.
+// the local process snapshot (WS `state`) drives the PROCESOS table; in server
+// mode the fleet view lists agents and the per-agent drill-down reuses the SAME
+// ProcessesView parameterized by an agentId (REST/tick fed), so only the base
+// path changes.
 
 import { api, getAuth, setAuth, clearAuth } from './api.js';
 import { WsClient } from './ws.js';
-import { OverviewView } from './views/overview.js';
-import { DetailView } from './views/detail.js';
+import { Router } from './router.js';
+import { ProcessesView } from './views/processes.js';
+import { DetailPanel } from './views/detailPanel.js';
 import { AgentsView } from './views/agents.js';
 import { SettingsView } from './views/settings.js';
 
 // --- DOM refs ---
 const els = {
   wsStatus: document.getElementById('ws-status'),
+  hostIndicator: document.getElementById('host-indicator'),
   pm2Banner: document.getElementById('pm2-banner'),
   pm2BannerText: document.getElementById('pm2-banner-text'),
   maintToggle: document.getElementById('maintenance-toggle'),
   logout: document.getElementById('logout-btn'),
   nav: document.getElementById('nav'),
-  overview: document.getElementById('view-overview'),
-  detail: document.getElementById('view-detail'),
+  viewProcesses: document.getElementById('view-processes'),
+  processesMain: document.getElementById('view-processes-main'),
+  detailPanel: document.getElementById('detail-panel'),
   fleet: document.getElementById('view-fleet'),
   settings: document.getElementById('view-settings'),
   confirmModal: document.getElementById('confirm-modal'),
@@ -38,8 +44,6 @@ const els = {
 // Discovered from GET /api/system/health. 'standalone' until proven otherwise so
 // the standalone path never waits on the probe.
 let mode = 'standalone';
-// Server mode: the agent currently drilled into (null = showing the fleet).
-let activeAgentId = null;
 
 // --- toasts ---
 function toast(message, kind = 'info') {
@@ -91,98 +95,160 @@ function ensureAuth() {
   return true;
 }
 
-// --- views + router ---
+// --- shared instances ---
 const ws = new WsClient();
 
-// Standalone views (constructed once, no agent scope). In server mode these are
-// rebuilt per selected agent (see mountAgentOverview / mountAgentDetail).
-let overview = new OverviewView({
-  root: els.overview,
-  onOpenDetail: (name) => route('detail', name),
+// Hash setter handed to the views so a row-select / tab-click / Fleet link just
+// writes the hash; the router's hashchange handler re-renders (one-way flow).
+const onNavigate = (hash) => {
+  location.hash = hash;
+};
+
+// The PROCESOS surface (table + summary + banner). One instance serves both
+// standalone (WS `state` fed via setProcesses) and server-mode agent drill-down
+// (its own AGENT_REFRESH_MS tick re-reads api.agentProcesses).
+const processes = new ProcessesView({
+  root: els.processesMain,
   confirm: confirmDialog,
   toast,
+  onNavigate,
+  detailRoot: els.detailPanel,
+  mode, // reassigned via setMode-equivalent before router.start()
 });
 
-let detail = new DetailView({
-  root: els.detail,
+// The right-side detail panel (folds detail.js, composes LogsView).
+const detailPanel = new DetailPanel({
+  root: els.detailPanel,
   ws,
   toast,
-  onBack: () => route('overview'),
+  confirm: confirmDialog,
 });
 
-// Server-mode fleet overview (lazily constructed when mode === 'server').
+// Keep the detail panel's tiles in sync with every table refresh. setProcesses
+// is the single refresh sink for BOTH paths — the standalone WS `state` frame
+// (app calls it below) and the server-mode AGENT_REFRESH_MS tick (ProcessesView
+// calls it internally) — so wrapping it here updates the panel on both without
+// touching the view module (FEAT-002/FEAT-003 contract: parent calls updateFrom
+// on each refresh).
+const _setProcesses = processes.setProcesses.bind(processes);
+processes.setProcesses = (procs) => {
+  _setProcesses(procs);
+  detailPanel.updateFrom(processes.processes);
+};
+
+// Server-mode fleet view (lazily constructed when mode === 'server').
 let fleet = null;
 
 // Settings view (lazily constructed when a master session is confirmed via
-// whoami). Null until a 200 renders the Settings nav in either mode.
+// whoami). Null until a 200 renders the Settings tab in either mode.
 let settings = null;
 
-let currentRoute = 'overview';
+// The router (constructed in boot once the mode is known).
+let router = null;
 
-function route(view, name) {
-  // Tear down detail (unsubscribes logs) when leaving it.
-  if (currentRoute === 'detail' && view !== 'detail') detail.unmount();
+// Tracks the currently selected process name so renderRoute can tell a scope/
+// selection change from a no-op and tear the detail panel down correctly.
+let selectedName = null;
+// Whether the Fleet view's timer/WS triggers are currently armed.
+let fleetActive = false;
 
-  currentRoute = view;
-  els.overview.hidden = view !== 'overview';
-  els.detail.hidden = view !== 'detail';
-  if (els.fleet) els.fleet.hidden = view !== 'fleet';
-  if (els.settings) els.settings.hidden = view !== 'settings';
+// --- route rendering (the single hash -> render path) ---
+function renderRoute(route) {
+  const view = route.view;
 
-  if (view === 'detail') {
-    detail.mount(name).catch((err) => toast(`detail failed: ${err.message}`, 'error'));
+  // Leaving Fleet: stop its timer + WS triggers.
+  if (fleetActive && view !== 'fleet') {
+    if (fleet) fleet.destroy();
+    fleetActive = false;
+  }
+
+  // Section visibility.
+  els.viewProcesses.hidden = view !== 'processes';
+  els.fleet.hidden = view !== 'fleet';
+  els.settings.hidden = view !== 'settings';
+
+  // Active tab (Procesos is active for both #/processes and #/fleet/:agentId
+  // drill-down since the drill-down parses to view 'processes'; Fleet is active
+  // only for the bare fleet list).
+  setActiveTab(view === 'fleet' ? 'fleet' : view === 'settings' ? 'settings' : 'processes');
+
+  if (view === 'processes') {
+    renderProcesses(route);
   } else if (view === 'fleet') {
-    if (fleet) fleet.refresh();
+    // Clear any lingering selection state from a prior drill-down.
+    selectedName = null;
+    if (fleet) {
+      if (!fleetActive) {
+        fleet.start(); // arms the shared-cadence timer + WS triggers + refresh()
+        fleetActive = true;
+      } else {
+        fleet.refresh();
+      }
+    }
   } else if (view === 'settings') {
-    if (settings) settings.mount().catch((err) => toast(`settings failed: ${err.message}`, 'error'));
+    if (settings) {
+      settings.mount().catch((err) => toast(`settings failed: ${err.message}`, 'error'));
+    }
+  }
+}
+
+function renderProcesses(route) {
+  const agentId = route.agentId || null;
+  const name = route.name || null;
+  const filter = route.filter === 'problems' ? 'problems' : null;
+
+  // Load/scope the right data set (standalone local vs. a drilled agent) and
+  // pre-select the "Con problemas" chip when ?filter=problems is present.
+  processes.setScope({ agentId, filter });
+
+  // Host indicator: standalone shows the browser origin; a drill-down adds the
+  // agent id (the Fleet card carries the real host meta).
+  updateHostIndicator(agentId);
+
+  // Mark the selected row for aria-selected (null clears it).
+  processes.select(name);
+
+  // Detail panel lifecycle: mount on a selection, unmount when cleared or when
+  // switching rows.
+  if (name) {
+    if (selectedName !== null && selectedName !== name) detailPanel.unmount();
+    showDetailPanel(true);
+    detailPanel
+      .mount(name, agentId || undefined, processes.processes)
+      .catch((err) => toast(`detail failed: ${err.message}`, 'error'));
+  } else if (selectedName !== null) {
+    detailPanel.unmount();
+    showDetailPanel(false);
   } else {
-    // overview (same component in both modes; the per-agent variant is bound to
-    // an agentId by openAgent)
-    overview.render();
+    showDetailPanel(false);
+  }
+  selectedName = name;
+}
+
+function showDetailPanel(visible) {
+  els.detailPanel.hidden = !visible;
+  els.viewProcesses.classList.toggle('has-detail', visible);
+}
+
+// --- top-bar helpers ---
+function setActiveTab(route) {
+  for (const link of els.nav.querySelectorAll('[data-route]')) {
+    const active = link.dataset.route === route;
+    link.classList.toggle('is-active', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
   }
 }
 
-// --- server-mode fleet wiring ---
-function buildNav() {
-  // Server mode adds a "Fleet" link; standalone keeps the single Overview link
-  // byte-identical.
-  if (mode !== 'server') return;
-  els.nav.innerHTML =
-    '<button type="button" class="nav__link" data-route="fleet">Fleet</button>';
+function updateHostIndicator(agentId) {
+  if (!els.hostIndicator) return;
+  // location.host is the dashboard origin (not necessarily the monitored PM2
+  // host — /api/system/health exposes no hostname). In an agent drill-down we
+  // additionally surface the agent id so the operator knows the scope.
+  els.hostIndicator.textContent = agentId ? `${location.host} · ${agentId}` : location.host;
 }
 
-function openAgent(agentId) {
-  activeAgentId = agentId;
-  // Rebuild the overview/detail bound to this agent; the per-agent process grid,
-  // control buttons, metrics, and log tail reuse the SAME components.
-  overview = new OverviewView({
-    root: els.overview,
-    onOpenDetail: (name) => route('detail', name),
-    confirm: confirmDialog,
-    toast,
-    agentId,
-  });
-  detail = new DetailView({
-    root: els.detail,
-    ws,
-    toast,
-    onBack: () => route('overview'),
-    agentId,
-  });
-  loadAgentOverview(agentId);
-}
-
-async function loadAgentOverview(agentId) {
-  route('overview');
-  try {
-    const procs = await api.agentProcesses(agentId);
-    overview.setProcesses(procs || []);
-  } catch (err) {
-    toast(`agent load failed: ${err.message}`, 'error');
-  }
-}
-
-// --- PM2 connectivity banner ---
+// --- PM2 connectivity banner (standalone only) ---
 function setPm2Connected(connected) {
   els.pm2Banner.hidden = connected;
   if (!connected) {
@@ -193,11 +259,13 @@ function setPm2Connected(connected) {
 // --- WebSocket wiring ---
 function wireWs() {
   ws.on('open', () => {
+    els.wsStatus.textContent = 'En vivo · WS';
     els.wsStatus.classList.add('is-open');
     els.wsStatus.classList.remove('is-closed');
     ws.subscribe(['state', 'alerts']);
   });
   ws.on('close', () => {
+    els.wsStatus.textContent = 'Sin conexión';
     els.wsStatus.classList.add('is-closed');
     els.wsStatus.classList.remove('is-open');
   });
@@ -223,9 +291,9 @@ function wireWs() {
 }
 
 function applySnapshot(snapshot) {
-  // The local-state snapshot only drives the standalone overview. In server mode
-  // there is no single local snapshot (the per-agent grids load via REST), so WS
-  // state frames are ignored for the process grid.
+  // The local-state snapshot only drives the standalone PROCESOS table. In server
+  // mode there is no single local snapshot (the per-agent grids load via REST and
+  // the AGENT_REFRESH_MS tick), so WS state frames are ignored for the grid.
   if (!snapshot) return;
   if (mode === 'server') return;
   setPm2Connected(snapshot.pm2Connected);
@@ -233,9 +301,8 @@ function applySnapshot(snapshot) {
   if (document.activeElement !== els.maintToggle) {
     els.maintToggle.checked = Boolean(snapshot.maintenance);
   }
-  overview.setProcesses(snapshot.processes || []);
-  // Overview re-renders only when it is the active view.
-  if (currentRoute === 'overview') overview.render();
+  // Feed the table (the wrapped setProcesses also refreshes the detail panel).
+  processes.setProcesses(snapshot.processes || []);
 }
 
 // --- maintenance toggle ---
@@ -243,10 +310,10 @@ els.maintToggle.addEventListener('change', async () => {
   const active = els.maintToggle.checked;
   try {
     await api.setMaintenance({ active });
-    toast(`Maintenance ${active ? 'enabled' : 'disabled'}`, 'success');
+    toast(`Mantenimiento ${active ? 'activado' : 'desactivado'}`, 'success');
   } catch (err) {
     els.maintToggle.checked = !active; // revert on failure
-    toast(`Maintenance change failed: ${err.message}`, 'error');
+    toast(`No se pudo cambiar mantenimiento: ${err.message}`, 'error');
   }
 });
 
@@ -257,18 +324,12 @@ els.logout.addEventListener('click', () => {
   window.location.reload();
 });
 
-// --- nav ---
-els.nav.addEventListener('click', (e) => {
-  const link = e.target.closest('[data-route]');
-  if (link) route(link.dataset.route);
-});
-
 // --- boot ---
 async function boot() {
   if (!ensureAuth()) {
-    els.overview.innerHTML =
-      '<div class="empty"><p>Credentials are required to use the dashboard.</p>' +
-      '<button type="button" class="btn btn--primary" onclick="location.reload()">Enter credentials</button></div>';
+    els.processesMain.innerHTML =
+      '<div class="empty"><p>Se requieren credenciales para usar el dashboard.</p>' +
+      '<button type="button" class="btn btn--primary" onclick="location.reload()">Ingresar credenciales</button></div>';
     return;
   }
 
@@ -281,6 +342,11 @@ async function boot() {
     /* non-fatal — assume standalone */
   }
 
+  // Propagate the discovered mode to the processes view (drives its no-agent
+  // empty state) now that it is known.
+  processes.mode = mode;
+  updateHostIndicator(null);
+
   wireWs();
 
   if (mode === 'server') {
@@ -289,18 +355,24 @@ async function boot() {
     await bootStandalone();
   }
 
-  // Master-gated Settings nav (both modes). Only a 200 from whoami renders it;
-  // any ApiError/network failure (403/401/5xx/timeout) leaves it absent and the
-  // view hidden (FR-F2/AC-34). Hard enforcement is server-side (requireMaster).
+  // Master-gated Settings tab (both modes). Only a 200 from whoami renders it;
+  // any ApiError/network failure leaves it absent and the route guarded
+  // (FR-33/AC-34). Hard enforcement is server-side (requireMaster).
   await setupSettingsNav();
+
+  // Hand navigation to the router. It reads the initial hash (or redirects to
+  // the mode default), then calls renderRoute. Constructed after whoami so
+  // isMaster gates #/settings correctly on the first resolve.
+  router = new Router({ mode, isMaster: Boolean(settings), app: { renderRoute } });
+  router.start();
 
   // Keep the WS warm.
   setInterval(() => ws.ping(), 30000);
 }
 
 // Appends a Settings nav button and lazily constructs SettingsView when the
-// stored credential is master. Runs after buildNav() (server mode) so it does not
-// clobber the Fleet link.
+// stored credential is master. Runs before router.start() so router.isMaster is
+// set when the first route resolves.
 async function setupSettingsNav() {
   let who;
   try {
@@ -323,8 +395,19 @@ async function setupSettingsNav() {
   btn.className = 'nav__link';
   btn.dataset.route = 'settings';
   btn.textContent = 'Settings';
+  btn.addEventListener('click', () => onNavigate('#/settings'));
   els.nav.appendChild(btn);
 }
+
+// Tab clicks set the hash; the router re-renders. (Settings is wired in
+// setupSettingsNav since it is appended dynamically.)
+els.nav.addEventListener('click', (e) => {
+  const link = e.target.closest('[data-route]');
+  if (!link) return;
+  const route = link.dataset.route;
+  if (route === 'processes') onNavigate('#/processes');
+  else if (route === 'fleet') onNavigate('#/fleet');
+});
 
 async function bootStandalone() {
   // Initial REST load so the grid fills even before the first WS frame, and to
@@ -335,9 +418,9 @@ async function bootStandalone() {
   } catch (err) {
     if (err.status === 401) {
       clearAuth();
-      toast('Invalid credentials — reload to re-enter.', 'error');
+      toast('Credenciales inválidas — recarga para reingresar.', 'error');
     } else {
-      toast(`Initial load failed: ${err.message}`, 'error');
+      toast(`Carga inicial fallida: ${err.message}`, 'error');
     }
   }
 
@@ -351,17 +434,16 @@ async function bootStandalone() {
 }
 
 async function bootServer() {
-  // The server has no local PM2 daemon, so hide the PM2-unreachable banner (its
-  // per-agent equivalent is the pm2-connected badge on each agent card).
+  // The server has no local PM2 daemon, so keep the PM2-unreachable banner hidden
+  // (its per-agent equivalent is the pm2-connected badge on each agent card).
   setPm2Connected(true);
 
-  buildNav();
   fleet = new AgentsView({
     root: els.fleet,
-    onOpenAgent: (id) => openAgent(id),
+    onNavigate,
     toast,
+    ws,
   });
-  route('fleet');
 
   // Reflect the global maintenance state (401 surfaces here too).
   try {
@@ -370,7 +452,7 @@ async function bootServer() {
   } catch (err) {
     if (err.status === 401) {
       clearAuth();
-      toast('Invalid credentials — reload to re-enter.', 'error');
+      toast('Credenciales inválidas — recarga para reingresar.', 'error');
     }
   }
 }
