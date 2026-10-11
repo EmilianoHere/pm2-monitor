@@ -15,6 +15,7 @@ logs/
 config/agent-id
 config/agent-aliases.json
 config/api-keys.json
+config/agent-tokens.json
 config/settings.json
 config/secrets.json
 

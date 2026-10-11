@@ -143,6 +143,13 @@ test('rawKey/hash/apiKey redact to *** at nested object depth', () => {
   assert.equal(generated.apiKey, '***');
 });
 
+test('rawToken redacts to *** (agent-token raw-once reveal)', () => {
+  const { logger, lines } = capture('info');
+  logger.info('agent-token', { rawToken: 'pmat_abcd1234secret', id: 'tok-1' });
+  assert.equal(lines[0].rawToken, '***');
+  assert.equal(lines[0].id, 'tok-1');
+});
+
 test('a sibling non-secret `key` field is NOT redacted', () => {
   const { logger, lines } = capture('info');
   logger.info('store', { key: 'config/settings.json', id: 'abc' });

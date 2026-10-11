@@ -11,11 +11,45 @@
  */
 
 import { safeEqual } from '../api/auth.js';
+import { sha256hex } from './apiKeyStore.js';
 import type { AppConfig } from '../config/env.js';
 
 /** The derived agent-auth config: the set of currently-accepted tokens. */
 export interface AgentAuthConfig {
   tokens: string[];
+}
+
+/**
+ * The LIVE token source the AgentGateway consults at validation time: the env
+ * anti-lockout tokens UNION the active store token hashes. Both are read fresh
+ * on every call so a token generated/revoked after boot takes effect with no
+ * gateway restart or rebuild.
+ */
+export interface AgentTokenResolver {
+  /** The configured env tokens (plaintext; anti-lockout, always accepted). */
+  envTokens(): readonly string[];
+  /** sha-256 hex digests of every ACTIVE token currently in the store. */
+  activeHashes(): readonly string[];
+}
+
+/**
+ * True iff `provided` matches any env token OR any active store-token hash,
+ * read live from the resolver. Uses a NON-short-circuiting OR over both sets so
+ * timing never reveals which candidate matched, and every comparison goes
+ * through the throw-safe {@link safeEqual}: a missing/empty/wrong-length
+ * credential returns false and NEVER throws. The provided value is hashed once
+ * (sha256hex) to compare against the at-rest hashes.
+ */
+export function validateLive(provided: string, resolver: AgentTokenResolver): boolean {
+  let ok = false;
+  for (const t of resolver.envTokens()) {
+    ok = safeEqual(provided, t) || ok;
+  }
+  const providedHash = sha256hex(provided);
+  for (const h of resolver.activeHashes()) {
+    ok = safeEqual(providedHash, h) || ok;
+  }
+  return ok;
 }
 
 /**

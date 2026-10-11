@@ -183,4 +183,12 @@ export const api = {
   revokeKey: (id) => request('DELETE', `/api/settings/keys/${encodeURIComponent(id)}`),
   relabelKey: (id, label) =>
     request('PATCH', `/api/settings/keys/${encodeURIComponent(id)}`, { body: { label } }),
+
+  // --- agent tokens (master-only; separate credential space from api keys) ---
+  listAgentTokens: () => request('GET', '/api/settings/agent-tokens'),
+  generateAgentToken: (label) => request('POST', '/api/settings/agent-tokens', { body: { label } }),
+  revokeAgentToken: (id) =>
+    request('DELETE', `/api/settings/agent-tokens/${encodeURIComponent(id)}`),
+  relabelAgentToken: (id, label) =>
+    request('PATCH', `/api/settings/agent-tokens/${encodeURIComponent(id)}`, { body: { label } }),
 };

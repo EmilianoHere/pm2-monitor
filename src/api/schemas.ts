@@ -334,3 +334,19 @@ export const secretFieldParam = z.object({
 export const keyIdParam = z.object({
   params: z.object({ id: z.string().uuid() }),
 });
+
+// --- Agent-token request schemas (reusing keyLabelBody + z.string().uuid()) ---
+
+/** POST /api/settings/agent-tokens — generate an agent token with a label. */
+export const agentTokenGenerate = z.object({ body: keyLabelBody });
+
+/** DELETE /api/settings/agent-tokens/:id — revoke an agent token. */
+export const agentTokenIdParam = z.object({
+  params: z.object({ id: z.string().uuid() }),
+});
+
+/** PATCH /api/settings/agent-tokens/:id — relabel an agent token. */
+export const agentTokenRelabel = z.object({
+  params: z.object({ id: z.string().uuid() }),
+  body: keyLabelBody,
+});

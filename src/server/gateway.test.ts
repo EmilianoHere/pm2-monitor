@@ -5,6 +5,8 @@ import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { AgentGateway, type GatewaySocket } from './gateway.js';
 import { FleetRegistry } from './registry.js';
+import { AgentTokenStore } from './agentTokenStore.js';
+import type { AgentTokenResolver } from './agentAuth.js';
 import { createLogger } from '../core/logger.js';
 import { decode, encode } from '../protocol/codec.js';
 import type { ProtocolMessage } from '../protocol/messages.js';
@@ -78,7 +80,21 @@ class FakeSocket implements GatewaySocket {
   }
 }
 
-function makeGateway(opts: { tokens?: string[]; maxPending?: number } = {}) {
+/** A live token store wired behind a resolver, for the gateway under test. */
+function makeStore() {
+  return new AgentTokenStore({
+    file: 'config/agent-tokens.json',
+    logger: silentLogger,
+    readFile: async () => {
+      throw new Error('ENOENT');
+    },
+    writeFile: async () => {},
+    rename: async () => {},
+    chmod: async () => {},
+  });
+}
+
+function makeGateway(opts: { tokens?: string[]; maxPending?: number; store?: AgentTokenStore } = {}) {
   const timers = makeTimers();
   const server = new EventEmitter() as unknown as Server;
   const registry = new FleetRegistry({
@@ -91,10 +107,16 @@ function makeGateway(opts: { tokens?: string[]; maxPending?: number } = {}) {
     clearTimer: timers.clearTimer,
   });
   const { logger, records } = recordingLogger();
+  const store = opts.store ?? makeStore();
+  const envTokens = opts.tokens ?? ['good-token'];
+  const resolver: AgentTokenResolver = {
+    envTokens: () => envTokens,
+    activeHashes: () => store.activeHashes(),
+  };
   const gateway = new AgentGateway({
     server,
     registry,
-    tokens: opts.tokens ?? ['good-token'],
+    resolver,
     wsPath: '/agent',
     logger,
     heartbeatSec: 10,
@@ -103,7 +125,7 @@ function makeGateway(opts: { tokens?: string[]; maxPending?: number } = {}) {
     setTimer: timers.setTimer,
     clearTimer: timers.clearTimer,
   });
-  return { gateway, registry, timers, records };
+  return { gateway, registry, timers, records, store };
 }
 
 const META = { hostname: 'h', platform: 'linux', monitorVersion: '1.0.0' };
@@ -220,7 +242,7 @@ test('reaching the pending cap refuses the next upgrade with 503-and-destroy', (
   const gateway = new AgentGateway({
     server,
     registry,
-    tokens: ['good-token'],
+    resolver: { envTokens: () => ['good-token'], activeHashes: () => [] },
     wsPath: '/agent',
     logger: silentLogger,
     maxPending: 1,
@@ -284,4 +306,43 @@ test('a disconnect after registration marks the agent offline', () => {
   assert.equal(registry.get('web-01')!.online, true);
   s.emit('close');
   assert.equal(registry.get('web-01')!.online, false, 'retained but offline');
+});
+
+test('accepts a register with a live-store token: register:ack + entry (AC-8)', async () => {
+  const store = makeStore();
+  const token = await store.generate('web-01');
+  const { gateway, registry } = makeGateway({ tokens: [], store });
+  const s = new FakeSocket();
+  gateway.handleSocket(s);
+  s.emit('message', registerFrame({ token: token.rawToken }));
+  assert.ok(s.lastOfType('register:ack'), 'register:ack sent for a store token');
+  assert.ok(registry.get('web-01'), 'agent registered');
+  assert.equal(s.closed, false);
+});
+
+test('rejects a register with a REVOKED store token: AUTH_FAILED + no entry (AC-9)', async () => {
+  const store = makeStore();
+  const token = await store.generate('web-01');
+  await store.revoke(token.id);
+  const { gateway, registry } = makeGateway({ tokens: [], store });
+  const s = new FakeSocket();
+  gateway.handleSocket(s);
+  s.emit('message', registerFrame({ token: token.rawToken }));
+  const nack = s.lastOfType('register:nack');
+  assert.ok(nack);
+  assert.equal(nack!.code, 'AUTH_FAILED');
+  assert.equal(s.closed, true);
+  assert.equal(registry.get('web-01'), undefined, 'not registered');
+});
+
+test('the resolver is consulted at validation time: a token generated AFTER construction authenticates (AC-10)', async () => {
+  const store = makeStore();
+  const { gateway, registry } = makeGateway({ tokens: [], store });
+  // No token exists at construction; generate one now.
+  const token = await store.generate('web-01');
+  const s = new FakeSocket();
+  gateway.handleSocket(s);
+  s.emit('message', registerFrame({ token: token.rawToken }));
+  assert.ok(s.lastOfType('register:ack'), 'post-construction token authenticated without restart');
+  assert.ok(registry.get('web-01'));
 });

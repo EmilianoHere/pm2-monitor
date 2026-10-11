@@ -31,7 +31,7 @@ import type { Logger } from '../core/logger.js';
 import { decode, encode } from '../protocol/codec.js';
 import type { ProtocolMessage } from '../protocol/messages.js';
 import { PROTOCOL_VERSION } from '../protocol/version.js';
-import { validate as validateToken } from './agentAuth.js';
+import { validateLive, type AgentTokenResolver } from './agentAuth.js';
 import type { FleetRegistry, AgentWebSocket } from './registry.js';
 
 export const MAX_PENDING_AGENT_SOCKETS = 50;
@@ -51,7 +51,7 @@ export interface GatewaySocket extends AgentWebSocket {
 export interface AgentGatewayOptions {
   server: Server;
   registry: FleetRegistry;
-  tokens: string[];
+  resolver: AgentTokenResolver;
   wsPath: string;
   logger: Logger;
   /** heartbeat seconds advertised in register:ack (default 15). */
@@ -74,7 +74,7 @@ interface PendingSocket {
 export class AgentGateway {
   private readonly server: Server;
   private readonly registry: FleetRegistry;
-  private readonly tokens: string[];
+  private readonly resolver: AgentTokenResolver;
   private readonly wsPath: string;
   private readonly logger: Logger;
   private readonly heartbeatSec: number;
@@ -95,7 +95,7 @@ export class AgentGateway {
   constructor(opts: AgentGatewayOptions) {
     this.server = opts.server;
     this.registry = opts.registry;
-    this.tokens = opts.tokens;
+    this.resolver = opts.resolver;
     this.wsPath = opts.wsPath;
     this.logger = opts.logger;
     this.heartbeatSec = opts.heartbeatSec ?? HEARTBEAT_SEC;
@@ -201,8 +201,9 @@ export class AgentGateway {
       this.safeClose(pending.socket);
       return;
     }
-    // Token check via throw-safe safeEqual; never log the token.
-    if (!validateToken(msg.token, this.tokens)) {
+    // Token check via the LIVE resolver (env tokens UNION active store hashes),
+    // every comparison through throw-safe safeEqual; never log the token.
+    if (!validateLive(msg.token, this.resolver)) {
       this.logger.warn('agent registration rejected', {
         path: this.wsPath,
         agentId: msg.agentId,

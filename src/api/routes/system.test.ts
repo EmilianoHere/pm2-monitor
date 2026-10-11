@@ -55,6 +55,7 @@ test('createServerHealthRouter reports mode:"server" with an agents summary and 
     registry: { size: 3, onlineCount: () => 2 },
     version: '1.0.0',
     startedAt: 1000,
+    agentWsPath: '/agent',
     now: () => 9000,
   });
   const h = await mount(router);
@@ -64,9 +65,30 @@ test('createServerHealthRouter reports mode:"server" with an agents summary and 
     assert.equal(body.mode, 'server');
     assert.equal(body.maintenance, true);
     assert.deepEqual(body.agents, { total: 3, online: 2 });
+    assert.equal(body.agentWsPath, '/agent', 'server health carries the agent ws path');
     assert.equal(body.version, '1.0.0');
     assert.equal(body.uptimeMs, 8000);
     assert.ok(!('pm2Connected' in body), 'server health omits pm2Connected');
+  } finally {
+    await h.close();
+  }
+});
+
+test('standalone health is unchanged: no agentWsPath field', async () => {
+  const deps = {
+    state: {
+      isConnected: () => true,
+      getMaintenance: () => ({ active: false }),
+    },
+    now: () => 5000,
+    startedAt: 1000,
+    version: '1.0.0',
+  } as unknown as ApiDeps;
+  const h = await mount(createHealthRouter(deps));
+  try {
+    const body = await get(h.base, '/api/system/health');
+    assert.equal(body.mode, 'standalone');
+    assert.ok(!('agentWsPath' in body), 'standalone health omits agentWsPath');
   } finally {
     await h.close();
   }

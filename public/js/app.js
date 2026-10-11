@@ -334,12 +334,26 @@ async function boot() {
   }
 
   // Discover the run mode (unauthenticated). Default stays 'standalone' on error
-  // so a probe failure never changes the standalone experience.
+  // so a probe failure never changes the standalone experience. The resolved
+  // health is hoisted so bootServer()/AgentsView can read agentWsPath.
+  let health = null;
   try {
-    const health = await api.health();
-    if (health && health.mode === 'server') mode = 'server';
+    health = await api.health();
+    if (health?.mode === 'server') mode = 'server';
   } catch {
     /* non-fatal — assume standalone */
+  }
+
+  // Derive the master signal once (whoami 200 => master). Any ApiError/network
+  // failure means "not master"; the result is reused by setupSettingsNav so it
+  // does not whoami a second time.
+  let isMaster = false;
+  let who = null;
+  try {
+    who = await api.whoami();
+    isMaster = who?.isMaster === true;
+  } catch {
+    isMaster = false;
   }
 
   // Propagate the discovered mode to the processes view (drives its no-agent
@@ -350,7 +364,7 @@ async function boot() {
   wireWs();
 
   if (mode === 'server') {
-    await bootServer();
+    await bootServer({ isMaster, health });
   } else {
     await bootStandalone();
   }
@@ -358,7 +372,7 @@ async function boot() {
   // Master-gated Settings tab (both modes). Only a 200 from whoami renders it;
   // any ApiError/network failure leaves it absent and the route guarded
   // (FR-33/AC-34). Hard enforcement is server-side (requireMaster).
-  await setupSettingsNav();
+  await setupSettingsNav(who);
 
   // Hand navigation to the router. It reads the initial hash (or redirects to
   // the mode default), then calls renderRoute. Constructed after whoami so
@@ -373,14 +387,8 @@ async function boot() {
 // Appends a Settings nav button and lazily constructs SettingsView when the
 // stored credential is master. Runs before router.start() so router.isMaster is
 // set when the first route resolves.
-async function setupSettingsNav() {
-  let who;
-  try {
-    who = await api.whoami();
-  } catch {
-    return; // not master (or transient failure) — no Settings entry
-  }
-  if (!who || who.isMaster !== true) return;
+async function setupSettingsNav(who) {
+  if (!who || who.isMaster !== true) return; // not master — no Settings entry
 
   settings = new SettingsView({
     root: els.settings,
@@ -433,7 +441,7 @@ async function bootStandalone() {
   }
 }
 
-async function bootServer() {
+async function bootServer({ isMaster = false, health = null } = {}) {
   // The server has no local PM2 daemon, so keep the PM2-unreachable banner hidden
   // (its per-agent equivalent is the pm2-connected badge on each agent card).
   setPm2Connected(true);
@@ -443,6 +451,8 @@ async function bootServer() {
     onNavigate,
     toast,
     ws,
+    isMaster,
+    health,
   });
 
   // Reflect the global maintenance state (401 surfaces here too).

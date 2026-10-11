@@ -47,6 +47,8 @@ export interface ServerHealthDeps {
   registry: FleetSummary;
   version: string;
   startedAt: number;
+  /** The agent WebSocket relay path (non-secret); surfaced for the connect modal. */
+  agentWsPath: string;
   now(): number;
 }
 
@@ -64,6 +66,7 @@ export function createServerHealthRouter(deps: ServerHealthDeps): Router {
       mode: 'server',
       maintenance: deps.maintenance.getMaintenance().active,
       agents: { total: deps.registry.size, online: deps.registry.onlineCount() },
+      agentWsPath: deps.agentWsPath,
       version: deps.version,
       uptimeMs: deps.now() - deps.startedAt,
     });

@@ -1338,6 +1338,80 @@ select {
   color: var(--accent);
 }
 
+/* --- Master connect-agent: generate flow, raw-once reveal + paste command --- */
+.connect-modal__generate {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 0 0 14px;
+}
+
+.connect-modal__generate input {
+  flex: 1;
+  min-width: 0;
+}
+
+.connect-modal__label {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* One-time secret reveal (shared shape with .key-modal__value). */
+.secret-reveal__row,
+.connect-modal__command-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.secret-reveal__row code {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+  font-family: var(--mono, monospace);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+/* The paste command: monospace, preserves newlines, wraps + scrolls if long. */
+.connect-modal__command {
+  flex: 1;
+  min-width: 0;
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.connect-modal__command-row .btn,
+.secret-reveal__row .btn {
+  flex-shrink: 0;
+}
+
+/* "No se vuelve a mostrar" warning banner. */
+.secret-reveal__warning {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  font-size: 13px;
+  border-radius: 6px;
+  color: var(--warn, #c77700);
+  background: rgba(214, 158, 46, 0.12);
+  border: 1px solid rgba(214, 158, 46, 0.4);
+}
+
 /* ============================================================
    FEAT-005 shell: top-bar host indicator + PROCESOS two-column
    layout (table surface + right detail-panel column, hidden

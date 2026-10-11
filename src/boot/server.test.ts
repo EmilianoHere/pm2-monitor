@@ -8,6 +8,7 @@ import { createLogger } from '../core/logger.js';
 import { buildSchemas } from '../api/schemas.js';
 import { FleetRegistry, type AgentWebSocket } from '../server/registry.js';
 import { AliasStore } from '../server/aliasStore.js';
+import { AgentTokenStore, AgentTokenService } from '../server/agentTokenStore.js';
 import { AlertEngine } from '../alerts/engine.js';
 import { MonitorEvents } from '../core/events.js';
 import {
@@ -36,10 +37,32 @@ function fakeConfig(): AppConfig {
     ERROR_BUFFER_SIZE: 500,
     DEFAULT_COOLDOWN_SEC: 300,
     ALLOWED_SCRIPT_ROOT: undefined,
+    AGENT_WS_PATH: '/agent',
   } as unknown as AppConfig;
 }
 
-async function boot(): Promise<{ base: string; registry: FleetRegistry; aliases: AliasStore; close: () => Promise<void> }> {
+/** An agent-token service backed by an in-memory (no-disk) store. */
+function makeAgentTokens(): AgentTokenService {
+  const store = new AgentTokenStore({
+    file: '/tmp/none-agent-tokens.json',
+    logger: silent,
+    readFile: async () => {
+      throw new Error('ENOENT');
+    },
+    writeFile: async () => {},
+    rename: async () => {},
+    chmod: async () => {},
+  });
+  return new AgentTokenService(store);
+}
+
+async function boot(): Promise<{
+  base: string;
+  registry: FleetRegistry;
+  aliases: AliasStore;
+  agentTokens: AgentTokenService;
+  close: () => Promise<void>;
+}> {
   const config = fakeConfig();
   const maintenance = new GlobalMaintenanceState();
   const registry = new FleetRegistry({ logger: silent, retentionMin: 180, sampleSec: 5, errorBufferSize: 500 });
@@ -51,6 +74,7 @@ async function boot(): Promise<{ base: string; registry: FleetRegistry; aliases:
     rename: async () => {},
   });
   await aliases.load();
+  const agentTokens = makeAgentTokens();
   const engine = new AlertEngine({
     rules: [],
     state: new FleetStateHub(registry, maintenance),
@@ -67,6 +91,7 @@ async function boot(): Promise<{ base: string; registry: FleetRegistry; aliases:
     maintenance,
     registry,
     aliases,
+    agentTokens,
     engine,
     schemas: buildSchemas(),
     startedAt: 1000,
@@ -81,6 +106,7 @@ async function boot(): Promise<{ base: string; registry: FleetRegistry; aliases:
     base: `http://127.0.0.1:${port}`,
     registry,
     aliases,
+    agentTokens,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -89,6 +115,25 @@ async function http(base: string, method: string, path: string, auth = true): Pr
   const res = await fetch(`${base}${path}`, {
     method,
     headers: auth ? { 'x-api-key': API_KEY } : {},
+  });
+  const text = await res.text();
+  return { status: res.status, json: text ? JSON.parse(text) : null };
+}
+
+/** Richer request helper: body + an optional explicit credential (null = none). */
+async function req(
+  base: string,
+  method: string,
+  path: string,
+  opts: { body?: unknown; key?: string | null } = {},
+): Promise<{ status: number; json: unknown }> {
+  const headers: Record<string, string> = {};
+  if (opts.key !== null) headers['x-api-key'] = opts.key ?? API_KEY;
+  if (opts.body !== undefined) headers['content-type'] = 'application/json';
+  const res = await fetch(`${base}${path}`, {
+    method,
+    headers,
+    ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
   });
   const text = await res.text();
   return { status: res.status, json: text ? JSON.parse(text) : null };
@@ -165,6 +210,119 @@ test('buildFleetDeps keys the list by the live registry (pre-seeded-only alias n
       'only live agents are listed; the pre-seeded ghost alias is not',
     );
     assert.equal(h.aliases.get('ghost'), 'NeverConnected', 'but the alias is still stored');
+  } finally {
+    await h.close();
+  }
+});
+
+// --- master-only agent-token routes (server mode) ---
+
+test('GET /api/settings/agent-tokens: master 200 masked list (AC-14)', async () => {
+  const h = await boot();
+  try {
+    await h.agentTokens.generate('web-01');
+    const res = await req(h.base, 'GET', '/api/settings/agent-tokens');
+    assert.equal(res.status, 200);
+    const rows = res.json as Array<Record<string, unknown>>;
+    assert.equal(rows.length, 1);
+    assert.deepEqual(Object.keys(rows[0]).sort(), ['createdAt', 'id', 'label', 'prefix', 'status'].sort());
+    assert.ok(!('hash' in rows[0]) && !('rawToken' in rows[0]), 'no hash/raw emitted');
+  } finally {
+    await h.close();
+  }
+});
+
+test('POST /api/settings/agent-tokens: 201 rawToken once; invalid -> 400 VALIDATION (AC-15)', async () => {
+  const h = await boot();
+  try {
+    const ok = await req(h.base, 'POST', '/api/settings/agent-tokens', { body: { label: 'web-01' } });
+    assert.equal(ok.status, 201);
+    const token = ok.json as Record<string, unknown>;
+    assert.ok(typeof token.rawToken === 'string' && (token.rawToken as string).length > 0);
+    assert.ok(/^pmat_/.test(token.prefix as string));
+    assert.ok(!('hash' in token), 'POST never emits the hash');
+
+    const bad = await req(h.base, 'POST', '/api/settings/agent-tokens', { body: { label: '' } });
+    assert.equal(bad.status, 400);
+    assert.equal((bad.json as { error: { code: string } }).error.code, 'VALIDATION');
+  } finally {
+    await h.close();
+  }
+});
+
+test('DELETE /api/settings/agent-tokens/:id: existing 200, unknown 404 (AC-16)', async () => {
+  const h = await boot();
+  try {
+    const token = await h.agentTokens.generate('web-01');
+    const del = await req(h.base, 'DELETE', `/api/settings/agent-tokens/${token.id}`);
+    assert.equal(del.status, 200);
+    assert.equal(h.agentTokens.list()[0].status, 'revoked');
+
+    const unknown = await req(h.base, 'DELETE', '/api/settings/agent-tokens/00000000-0000-4000-8000-000000000000');
+    assert.equal(unknown.status, 404);
+    assert.equal((unknown.json as { error: { code: string } }).error.code, 'NOT_FOUND');
+  } finally {
+    await h.close();
+  }
+});
+
+test('PATCH /api/settings/agent-tokens/:id: relabel 200 (hash/prefix/id unchanged), unknown 404 (AC-17)', async () => {
+  const h = await boot();
+  try {
+    const token = await h.agentTokens.generate('old');
+    const before = h.agentTokens.list()[0];
+    const patch = await req(h.base, 'PATCH', `/api/settings/agent-tokens/${token.id}`, { body: { label: 'new' } });
+    assert.equal(patch.status, 200);
+    const after = h.agentTokens.list()[0];
+    assert.equal(after.label, 'new');
+    assert.equal(after.prefix, before.prefix, 'prefix unchanged');
+    assert.equal(after.id, before.id, 'id unchanged');
+
+    const unknown = await req(h.base, 'PATCH', '/api/settings/agent-tokens/00000000-0000-4000-8000-000000000000', {
+      body: { label: 'x' },
+    });
+    assert.equal(unknown.status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test('agent-token routes: no/invalid credential -> 401 (AC-18)', async () => {
+  const h = await boot();
+  try {
+    const noCred = await req(h.base, 'GET', '/api/settings/agent-tokens', { key: null });
+    assert.equal(noCred.status, 401);
+    const badCred = await req(h.base, 'GET', '/api/settings/agent-tokens', { key: 'not-the-master-key' });
+    assert.equal(badCred.status, 401);
+    // POST/DELETE/PATCH equally gated before any handler runs.
+    const postNoCred = await req(h.base, 'POST', '/api/settings/agent-tokens', { key: null, body: { label: 'x' } });
+    assert.equal(postNoCred.status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test('no route emits a hash; only POST emits a raw token (AC-19)', async () => {
+  const h = await boot();
+  try {
+    const gen = await req(h.base, 'POST', '/api/settings/agent-tokens', { body: { label: 'web-01' } });
+    assert.ok('rawToken' in (gen.json as Record<string, unknown>));
+    const list = await req(h.base, 'GET', '/api/settings/agent-tokens');
+    assert.ok(!JSON.stringify(list.json).includes('rawToken'));
+    assert.ok(!JSON.stringify(list.json).includes('hash'));
+  } finally {
+    await h.close();
+  }
+});
+
+test('GET /api/settings/whoami in server mode: master 200 {isMaster:true, authMode}', async () => {
+  const h = await boot();
+  try {
+    const res = await req(h.base, 'GET', '/api/settings/whoami');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json, { isMaster: true, authMode: 'apikey' });
+    const noCred = await req(h.base, 'GET', '/api/settings/whoami', { key: null });
+    assert.equal(noCred.status, 401);
   } finally {
     await h.close();
   }

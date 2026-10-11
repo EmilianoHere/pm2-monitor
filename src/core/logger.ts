@@ -33,6 +33,7 @@ export const REDACTED_KEYS: ReadonlySet<string> = new Set([
   'AGENT_TOKENS',
   'SERVER_URL',
   'rawKey',
+  'rawToken',
   'hash',
   'apiKey',
 ]);

@@ -17,7 +17,7 @@
 // AgentsView + the module filename so app.js imports resolve until FEAT-005
 // swaps the constructor and router-wires it.
 
-import { api } from '../api.js';
+import { api, ApiError } from '../api.js';
 import {
   agentHealth,
   attentionCounts,
@@ -55,12 +55,16 @@ export class AgentsView {
    * @param {(hash:string)=>void} opts.onNavigate  sets location.hash (the router owns navigation)
    * @param {(msg:string, kind?:string)=>void} opts.toast
    * @param {{ on:(type:string, fn:Function)=>Function }} [opts.ws]  WS client; 'state'/'alert' trigger a debounced refresh
+   * @param {boolean} [opts.isMaster]  whether this session is master (gates token generation)
+   * @param {object|null} [opts.health]  the resolved GET /api/system/health body (carries agentWsPath)
    */
-  constructor({ root, onNavigate, toast, ws }) {
+  constructor({ root, onNavigate, toast, ws, isMaster = false, health = null }) {
     this.root = root;
     this.onNavigate = onNavigate;
     this.toast = toast;
     this.ws = ws || null;
+    this.isMaster = isMaster === true;
+    this.health = health || null;
 
     /** @type {Array<object>} the GET /api/agents rows. */
     this.agents = [];
@@ -445,11 +449,15 @@ export class AgentsView {
     }
 
     const body = modal.querySelector('[data-connect-body]') || modal.querySelector('.modal__body');
-    if (body) body.innerHTML = this._connectBodyHtml();
+    // A master session gets the live generate flow; everyone else sees the
+    // placeholder-only body (never a real token).
+    if (body) body.innerHTML = this.isMaster ? this._connectBodyMasterHtml() : this._connectBodyHtml();
 
     modal.hidden = false;
 
-    // Close on the backdrop, any [data-connect-close] control, and Escape.
+    // Close on the backdrop, any [data-connect-close] control, and Escape. These
+    // live OUTSIDE [data-connect-body], so re-rendering the body (on generate)
+    // never detaches them.
     const close = () => this.closeConnectModal();
     for (const el of modal.querySelectorAll('[data-connect-close], .modal__backdrop')) {
       el.addEventListener('click', close, { once: true });
@@ -458,6 +466,36 @@ export class AgentsView {
       if (e.key === 'Escape') close();
     };
     document.addEventListener('keydown', this._connectKeydown);
+
+    // Master-only: wire the "Generar token" button inside the body.
+    if (this.isMaster) {
+      const genBtn = modal.querySelector('[data-generate-token]');
+      if (genBtn) genBtn.addEventListener('click', () => this._generateToken());
+    }
+  }
+
+  /**
+   * Master-only: generate an agent token, then render the one-time reveal + the
+   * ready-to-paste command into [data-generate-result]. On failure keep the
+   * result area empty and toast.
+   */
+  async _generateToken() {
+    const modal = document.getElementById('connect-modal');
+    if (!modal) return;
+    const labelInput = modal.querySelector('[data-token-label]');
+    const label = (labelInput ? labelInput.value : '').trim();
+    if (!label) {
+      this.toast('Ingresá una etiqueta para el token.', 'error');
+      return;
+    }
+    try {
+      const result = await api.generateAgentToken(label);
+      this._renderGeneratedToken(result);
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err?.message ?? err);
+      this.toast(`No se pudo generar el token: ${msg}`, 'error');
+      // Leave [data-generate-result] empty on failure.
+    }
   }
 
   closeConnectModal() {
@@ -502,5 +540,123 @@ export class AgentsView {
           Guía completa: <a href="docs/AGENT_PM2.md" target="_blank" rel="noopener">docs/AGENT_PM2.md</a>
         </p>
       </div>`;
+  }
+
+  /** The agent ws path to advertise: health.agentWsPath, falling back to the default. */
+  _agentWsPath() {
+    return (this.health && this.health.agentWsPath) || DEFAULT_AGENT_WS_PATH;
+  }
+
+  /** The SERVER_URL hint derived from the current origin (ws/wss), never a stored secret. */
+  _serverUrl() {
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${scheme}://${location.host}`;
+  }
+
+  /**
+   * Master-only connect body: read-only SERVER_URL/AGENT_WS_PATH hints, a label
+   * input, a "Generar token" button, and an (initially empty) result area that
+   * _renderGeneratedToken fills with the raw-once reveal + the paste command.
+   */
+  _connectBodyMasterHtml() {
+    return `
+      <div class="connect-modal">
+        <p class="connect-modal__intro">
+          Generá un token de agente y copiá el comando para conectar el servidor
+          (<code>MODE=agent</code>). El token se muestra una sola vez.
+        </p>
+        <dl class="connect-modal__fields">
+          <div class="connect-modal__field">
+            <dt>SERVER_URL</dt>
+            <dd><code>${escapeHtml(this._serverUrl())}</code></dd>
+          </div>
+          <div class="connect-modal__field">
+            <dt>AGENT_WS_PATH</dt>
+            <dd><code>${escapeHtml(this._agentWsPath())}</code></dd>
+          </div>
+        </dl>
+        <div class="connect-modal__generate">
+          <input type="text" data-token-label maxlength="100"
+            placeholder="Etiqueta (p. ej. web-01)" aria-label="Etiqueta del token" />
+          <button type="button" class="btn btn--primary" data-generate-token>Generar token</button>
+        </div>
+        <div data-generate-result></div>
+      </div>`;
+  }
+
+  /**
+   * Fill ONLY [data-generate-result] (so the backdrop/Escape/close controls that
+   * live outside the body survive): the raw token once + a "no se vuelve a
+   * mostrar" warning, and a ready-to-paste command carrying SERVER_URL,
+   * AGENT_WS_PATH, the embedded AGENT_TOKEN, the agent .env lines and the pm2
+   * start step. Re-binds both Copy buttons after each render.
+   */
+  _renderGeneratedToken(result) {
+    const modal = document.getElementById('connect-modal');
+    if (!modal) return;
+    const target = modal.querySelector('[data-generate-result]');
+    if (!target) return;
+
+    const serverUrl = this._serverUrl();
+    const wsPath = this._agentWsPath();
+    const rawToken = result.rawToken;
+
+    // The ready-to-paste agent config: an .env block (placeholder API_KEY, since
+    // the agent needs its own human-auth key) plus the pm2 start command.
+    const command = [
+      '# .env del agente',
+      'MODE=agent',
+      `SERVER_URL=${serverUrl}`,
+      `AGENT_WS_PATH=${wsPath}`,
+      `AGENT_TOKEN=${rawToken}`,
+      'API_KEY=<cualquier-clave>',
+      '',
+      'pm2 start dist/index.js --name pm2-agent --cwd $(pwd)',
+    ].join('\n');
+
+    target.innerHTML = `
+      <div class="secret-reveal">
+        <p class="connect-modal__label">Token del agente (AGENT_TOKEN)</p>
+        <div class="secret-reveal__row">
+          <code data-token-raw>${escapeHtml(rawToken)}</code>
+          <button type="button" class="btn btn--sm" data-copy-token>Copiar</button>
+        </div>
+        <p class="secret-reveal__warning" role="status">
+          Guardalo ahora: no se vuelve a mostrar.
+        </p>
+      </div>
+      <div class="connect-modal__command-wrap">
+        <p class="connect-modal__label">Comando para configurar el agente</p>
+        <div class="connect-modal__command-row">
+          <code class="connect-modal__command" data-command>${escapeHtml(command)}</code>
+          <button type="button" class="btn btn--sm" data-copy-command>Copiar</button>
+        </div>
+      </div>`;
+
+    // Re-bind both Copy buttons after each render.
+    this._bindCopy(target.querySelector('[data-copy-token]'), rawToken, 'Token copiado');
+    this._bindCopy(target.querySelector('[data-copy-command]'), command, 'Comando copiado');
+  }
+
+  /** Wire a Copy button to write `value` to the clipboard (with a fallback). */
+  _bindCopy(btn, value, okMsg) {
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(value);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = value;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          ta.remove();
+        }
+        this.toast(okMsg, 'success');
+      } catch {
+        this.toast('No se pudo copiar — seleccioná y copiá manualmente.', 'error');
+      }
+    });
   }
 }

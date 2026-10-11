@@ -60,21 +60,25 @@ export class SettingsView {
 
     this.settings = null; // { hot: SettingField[], restart: SettingField[] }
     this.keys = []; // PublicKeyRow[]
+    this.agentTokens = []; // PublicAgentTokenRow[]
     this.fieldErrors = {}; // key -> message (from the last 400 VALIDATION)
     this.editingKey = null; // key id currently being relabeled
+    this.editingToken = null; // agent-token id currently being relabeled
     this.loadError = null;
   }
 
-  // Fetch both panels, then render. Called on mount and after any mutation.
+  // Fetch all panels, then render. Called on mount and after any mutation.
   async refresh() {
     this.loadError = null;
     try {
-      const [settings, keys] = await Promise.all([
+      const [settings, keys, agentTokens] = await Promise.all([
         this.api.getSettings(),
         this.api.listKeys(),
+        this.api.listAgentTokens(),
       ]);
       this.settings = settings;
       this.keys = Array.isArray(keys) ? keys : [];
+      this.agentTokens = Array.isArray(agentTokens) ? agentTokens : [];
     } catch (err) {
       this.loadError = err.message;
     }
@@ -105,6 +109,7 @@ export class SettingsView {
       <div class="settings">
         ${this.configPanelHtml()}
         ${this.keysPanelHtml()}
+        ${this.agentTokensPanelHtml()}
       </div>`;
     this.bind();
   }
@@ -240,6 +245,63 @@ export class SettingsView {
       </tr>`;
   }
 
+  // --- agent tokens panel ---
+
+  agentTokensPanelHtml() {
+    const rows = this.agentTokens.length
+      ? this.agentTokens.map((t) => this.agentTokenRowHtml(t)).join('')
+      : `<tr><td colspan="5" class="metric__label">No agent tokens yet.</td></tr>`;
+
+    return `
+      <section class="panel settings__agent-tokens">
+        <div class="section-head">
+          <h3>Agent Tokens</h3>
+          <button type="button" class="btn btn--sm btn--primary" data-generate-agent-token>Generate</button>
+        </div>
+        <p class="metric__label">
+          Credentials agents present to register (separate from API keys). The raw
+          token is shown once on creation and never again.
+        </p>
+        <table class="data-table">
+          <thead>
+            <tr><th>Label</th><th>Prefix</th><th>Created</th><th>Status</th><th></th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </section>`;
+  }
+
+  agentTokenRowHtml(t) {
+    const id = t.id;
+    const statusHtml =
+      t.status === 'active'
+        ? '<span class="status status--online">active</span>'
+        : '<span class="status status--stopped">revoked</span>';
+
+    const labelCell =
+      this.editingToken === id
+        ? `<input type="text" class="key-relabel-input" data-token-relabel-input="${escapeHtml(id)}"
+             value="${escapeHtml(t.label ?? '')}" maxlength="100" />
+           <button type="button" class="btn btn--sm" data-token-relabel-save="${escapeHtml(id)}">Save</button>
+           <button type="button" class="btn btn--sm btn--ghost" data-token-relabel-cancel="${escapeHtml(id)}">Cancel</button>`
+        : `<span class="key-label">${escapeHtml(t.label ?? '')}</span>
+           <button type="button" class="btn btn--sm btn--ghost" data-token-relabel-edit="${escapeHtml(id)}" title="Rename (visual only)">✎</button>`;
+
+    const actions =
+      t.status === 'active'
+        ? `<button type="button" class="btn btn--sm btn--danger" data-revoke-agent-token="${escapeHtml(id)}">Revoke</button>`
+        : '';
+
+    return `
+      <tr data-agent-token-row="${escapeHtml(id)}">
+        <td>${labelCell}</td>
+        <td><code>${escapeHtml(t.prefix ?? '')}</code></td>
+        <td>${escapeHtml(fmtDate(t.createdAt))}</td>
+        <td>${statusHtml}</td>
+        <td>${actions}</td>
+      </tr>`;
+  }
+
   // --- events ---
 
   bind() {
@@ -282,6 +344,89 @@ export class SettingsView {
           this.render();
         }
       });
+    }
+
+    // --- agent tokens ---
+    const genToken = this.root.querySelector('[data-generate-agent-token]');
+    if (genToken) genToken.addEventListener('click', () => this.generateAgentToken());
+
+    for (const el of this.root.querySelectorAll('[data-revoke-agent-token]')) {
+      el.addEventListener('click', () => this.revokeAgentToken(el.dataset.revokeAgentToken));
+    }
+    for (const el of this.root.querySelectorAll('[data-token-relabel-edit]')) {
+      el.addEventListener('click', () => {
+        this.editingToken = el.dataset.tokenRelabelEdit;
+        this.render();
+        const input = this.root.querySelector('[data-token-relabel-input]');
+        if (input) input.focus();
+      });
+    }
+    for (const el of this.root.querySelectorAll('[data-token-relabel-cancel]')) {
+      el.addEventListener('click', () => {
+        this.editingToken = null;
+        this.render();
+      });
+    }
+    for (const el of this.root.querySelectorAll('[data-token-relabel-save]')) {
+      el.addEventListener('click', () => this.relabelAgentToken(el.dataset.tokenRelabelSave));
+    }
+    const tokenRelabelInput = this.root.querySelector('[data-token-relabel-input]');
+    if (tokenRelabelInput) {
+      tokenRelabelInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') this.relabelAgentToken(tokenRelabelInput.dataset.tokenRelabelInput);
+        if (e.key === 'Escape') {
+          this.editingToken = null;
+          this.render();
+        }
+      });
+    }
+  }
+
+  // --- agent-token handlers ---
+
+  async generateAgentToken() {
+    const label = (window.prompt('Label for the new agent token:') || '').trim();
+    if (!label) return;
+    try {
+      const created = await this.api.generateAgentToken(label);
+      // Agent-token path reads created.rawToken (NEVER .rawKey).
+      this.showSecretModal({ title: 'Agent token created', value: created.rawToken });
+      await this.refresh();
+    } catch (err) {
+      this.toast(`Generate failed: ${err.message}`, 'error');
+    }
+  }
+
+  async revokeAgentToken(id) {
+    const ok = await this.confirm({
+      title: 'Revoke agent token',
+      body: 'Revoke this agent token? Agents using it will stop authenticating.',
+      confirmLabel: 'Revoke',
+    });
+    if (!ok) return;
+    try {
+      await this.api.revokeAgentToken(id);
+      this.toast('Agent token revoked', 'success');
+      await this.refresh();
+    } catch (err) {
+      this.toast(`Revoke failed: ${err.message}`, 'error');
+    }
+  }
+
+  async relabelAgentToken(id) {
+    const input = this.root.querySelector(`[data-token-relabel-input="${CSS.escape(id)}"]`);
+    const label = input ? input.value.trim() : '';
+    if (!label) {
+      this.toast('Label cannot be empty', 'error');
+      return;
+    }
+    try {
+      await this.api.relabelAgentToken(id, label);
+      this.toast('Agent token relabeled', 'success');
+      this.editingToken = null;
+      await this.refresh();
+    } catch (err) {
+      this.toast(`Relabel failed: ${err.message}`, 'error');
     }
   }
 
@@ -369,16 +514,19 @@ export class SettingsView {
     if (!label) return;
     try {
       const created = await this.api.generateKey(label);
-      this.showKeyModal(created);
+      // Human api-key path reads created.rawKey.
+      this.showSecretModal({ title: 'API key created', value: created.rawKey });
       await this.refresh();
     } catch (err) {
       this.toast(`Generate failed: ${err.message}`, 'error');
     }
   }
 
-  // One-time raw-key modal (reuses the .modal pattern). The raw key is shown here
-  // and nowhere else; the list never carries it.
-  showKeyModal(created) {
+  // One-time secret-reveal modal (reuses the .modal pattern). The raw value is
+  // shown here and nowhere else; the lists never carry it. Shared by the api-key
+  // path (value = created.rawKey) and the agent-token path (value =
+  // created.rawToken).
+  showSecretModal({ title, value }) {
     const existing = document.getElementById('key-modal');
     if (existing) existing.remove();
 
@@ -388,13 +536,13 @@ export class SettingsView {
     modal.innerHTML = `
       <div class="modal__backdrop" data-key-modal-close></div>
       <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="key-modal-title">
-        <h2 class="modal__title" id="key-modal-title">API key created</h2>
+        <h2 class="modal__title" id="key-modal-title">${escapeHtml(title)}</h2>
         <p class="modal__body">
-          Copy this key now. You won't be able to see it again — only its prefix and
+          Copy this now. You won't be able to see it again — only its prefix and
           label are stored.
         </p>
         <div class="key-modal__value">
-          <code data-key-raw>${escapeHtml(created.rawKey)}</code>
+          <code data-key-raw>${escapeHtml(value)}</code>
           <button type="button" class="btn btn--sm" data-key-copy>Copy</button>
         </div>
         <div class="modal__actions">
@@ -412,7 +560,7 @@ export class SettingsView {
       copyBtn.addEventListener('click', async () => {
         try {
           if (navigator.clipboard && navigator.clipboard.writeText) {
-            await navigator.clipboard.writeText(created.rawKey);
+            await navigator.clipboard.writeText(value);
           } else {
             const range = document.createRange();
             range.selectNodeContents(modal.querySelector('[data-key-raw]'));
@@ -422,7 +570,7 @@ export class SettingsView {
             document.execCommand('copy');
             sel.removeAllRanges();
           }
-          this.toast('Key copied to clipboard', 'success');
+          this.toast('Copied to clipboard', 'success');
         } catch {
           this.toast('Copy failed — select and copy manually', 'error');
         }

@@ -33,11 +33,14 @@ import { buildSchemas, type RequestSchemas } from '../api/schemas.js';
 import { createAuthMiddleware } from '../api/auth.js';
 import { createServerHealthRouter } from '../api/routes/system.js';
 import { createAgentsRouter, type FleetDeps, type AgentListRow, type AgentDetail, type AgentLogLine } from '../api/routes/agents.js';
+import { createAgentTokensRouter } from '../api/routes/agentTokens.js';
+import { requireMaster } from '../api/auth.js';
 import { WsHub, type FleetLogRelay } from '../ws/hub.js';
 import { FleetRegistry } from '../server/registry.js';
 import { AgentGateway } from '../server/gateway.js';
 import { AliasStore } from '../server/aliasStore.js';
-import { buildAgentAuthConfig } from '../server/agentAuth.js';
+import { AgentTokenStore, AgentTokenService } from '../server/agentTokenStore.js';
+import { buildAgentAuthConfig, type AgentTokenResolver } from '../server/agentAuth.js';
 import {
   GlobalMaintenanceState,
   FleetStateHub,
@@ -135,6 +138,9 @@ export async function bootstrapServer(config: Readonly<AppConfig>, logger: Logge
   });
   const aliases = new AliasStore({ file: config.ALIAS_STORE_FILE, logger });
   await aliases.load();
+  const agentTokenStore = new AgentTokenStore({ file: 'config/agent-tokens.json', logger });
+  await agentTokenStore.load();
+  const agentTokens = new AgentTokenService(agentTokenStore);
 
   // --- channels ---
   const teams = new TeamsChannel({
@@ -163,7 +169,7 @@ export async function bootstrapServer(config: Readonly<AppConfig>, logger: Logge
   // --- HTTP(S) server (native TLS when the cert+key pair is set) ---
   const schemas = buildSchemas({ allowedScriptRoot: config.ALLOWED_SCRIPT_ROOT });
   const startedAt = Date.now();
-  const app = buildServerApp({ config, logger, maintenance, registry, aliases, engine, schemas, startedAt, getRules: () => rules, setRules: (r) => { rules = r; } });
+  const app = buildServerApp({ config, logger, maintenance, registry, aliases, agentTokens, engine, schemas, startedAt, getRules: () => rules, setRules: (r) => { rules = r; } });
 
   let server: Server;
   if (config.TLS_CERT_FILE && config.TLS_KEY_FILE) {
@@ -196,8 +202,14 @@ export async function bootstrapServer(config: Readonly<AppConfig>, logger: Logge
   });
 
   // --- agent gateway on the shared server ---
-  const { tokens } = buildAgentAuthConfig(config);
-  const gateway = new AgentGateway({ server, registry, tokens, wsPath: config.AGENT_WS_PATH, logger });
+  // The resolver reads the env anti-lockout tokens UNION the live active store
+  // hashes on every validation, so generate/revoke takes effect with no restart.
+  const { tokens: envTokens } = buildAgentAuthConfig(config);
+  const resolver: AgentTokenResolver = {
+    envTokens: () => envTokens,
+    activeHashes: () => agentTokens.activeHashes(),
+  };
+  const gateway = new AgentGateway({ server, registry, resolver, wsPath: config.AGENT_WS_PATH, logger });
 
   await new Promise<void>((resolve) => {
     server.listen(config.PORT, config.HOST, () => {
@@ -246,6 +258,7 @@ interface ServerAppDeps {
   maintenance: GlobalMaintenanceState;
   registry: FleetRegistry;
   aliases: AliasStore;
+  agentTokens: AgentTokenService;
   engine: AlertEngine;
   schemas: RequestSchemas;
   startedAt: number;
@@ -277,6 +290,7 @@ export function buildServerApp(deps: ServerAppDeps): express.Express {
       registry: deps.registry,
       version: MONITOR_VERSION,
       startedAt: deps.startedAt,
+      agentWsPath: config.AGENT_WS_PATH,
       now: () => Date.now(),
     }),
   );
@@ -292,6 +306,10 @@ export function buildServerApp(deps: ServerAppDeps): express.Express {
 
   // Unified fleet surface.
   app.use('/api/agents', createAgentsRouter({ fleet: buildFleetDeps(deps.registry, deps.aliases), schemas: deps.schemas, now: () => Date.now() }));
+
+  // Master-only settings surface: whoami + agent-token management. Mounted
+  // behind requireMaster (the global /api auth already ran), BEFORE the /api 404.
+  app.use('/api/settings', requireMaster, createServerSettingsRouter(deps.agentTokens, config));
 
   // Static dashboard shell (unauthenticated), identical to standalone — the same
   // public/ assets serve the fleet UI, which discovers server mode from health.
@@ -317,6 +335,21 @@ export function buildServerApp(deps: ServerAppDeps): express.Express {
 }
 
 // --- small inline routers reused from the human surface shapes ---
+
+/**
+ * The server-mode master settings router: a whoami identity probe (reaching it
+ * already proves master, since the mount is behind requireMaster) plus the four
+ * agent-token routes under /agent-tokens. authMode is derived from
+ * buildAuthConfig(config).mode (NOT config.MODE/config.AUTH_MODE).
+ */
+export function createServerSettingsRouter(agentTokens: AgentTokenService, config: Readonly<AppConfig>): Router {
+  const router = Router();
+  router.get('/whoami', (_req, res) => {
+    res.json({ isMaster: true, authMode: buildAuthConfig(config).mode });
+  });
+  router.use('/agent-tokens', createAgentTokensRouter(agentTokens));
+  return router;
+}
 
 /** Global maintenance router over the holder (same JSON shape as standalone). */
 function createMaintenanceRouter(holder: GlobalMaintenanceState, schemas: RequestSchemas): Router {

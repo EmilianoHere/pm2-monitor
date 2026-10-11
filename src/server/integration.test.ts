@@ -61,7 +61,13 @@ async function boot(): Promise<Fixture> {
   // --- server side ---
   const server: Server = createServer();
   const registry = new FleetRegistry({ logger: silent, retentionMin: 180, sampleSec: 5, errorBufferSize: 500 });
-  const gateway = new AgentGateway({ server, registry, tokens: [TOKEN], wsPath: '/agent', logger: silent });
+  const gateway = new AgentGateway({
+    server,
+    registry,
+    resolver: { envTokens: () => [TOKEN], activeHashes: () => [] },
+    wsPath: '/agent',
+    logger: silent,
+  });
 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   const { port } = server.address() as AddressInfo;
