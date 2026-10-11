@@ -263,6 +263,13 @@ See [DEPLOY.md](./DEPLOY.md) for full instructions covering the Docker image,
 Docker Compose, the Helm chart (secrets, Ingress TLS, alias-store PVC),
 connecting native agents, and secret handling.
 
+Step-by-step guides:
+
+- [docs/SERVER_DOCKER.md](./docs/SERVER_DOCKER.md) — run the server (hub) with
+  Docker Compose, end to end (env setup, `up`, verify, alias persistence, TLS).
+- [docs/AGENT_PM2.md](./docs/AGENT_PM2.md) — run an agent under PM2 on each host
+  (env setup, outbound connection to the server, verify from the dashboard).
+
 ## Authentication
 
 Every `/api/*` endpoint requires auth **except** `GET /api/system/health`. The
